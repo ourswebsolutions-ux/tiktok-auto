@@ -1,0 +1,376 @@
+'use strict';
+// TikTok Studio automation (runs inside the user's own logged-in Chrome session).
+// Verified against tiktok.com/tiktokstudio on 2026-11-25:
+//   upload page has "Videos | Photos" tabs; Photos -> input[type=file][accept*=image]
+//   editor: title input[placeholder="Add a catchy title"], description Draft.js editor inside
+//           [data-e2e=caption_container], "Add sound" button, [data-e2e=aigc_container] switch, "Post" button
+//   sound picker: .TUXModal-overlay with input[placeholder="Search sounds"], rows [class*=MusicPanelMusicItem]
+//           each with a "Use" control. TikTok's own sound data (incl. user_count = number of videos using
+//           the sound) is read passively from the responses the picker itself loads.
+
+const { NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet } = require('./util');
+
+const UPLOAD_URL = 'https://www.tiktok.com/tiktokstudio/upload?from=webapp';
+const CONTENT_URL = 'https://www.tiktok.com/tiktokstudio/content';
+const MIN_SOUND_USES = 10000; // a sound must be visibly used in at least this many videos to count as popular
+const SITE = 'TikTok';
+
+const fmtCount = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n));
+
+function assertNotLoginPage(page) {
+  if (/tiktok\.com\/login|\/login\?/i.test(page.url())) {
+    throw new NeedsHumanError('TikTok is not logged in in your Chrome profile. Please log in to tiktok.com in Chrome.', { site: SITE, page });
+  }
+}
+
+async function openUploader(page, shouldAbort) {
+  await page.goto(UPLOAD_URL, { waitUntil: 'commit', timeout: 90000 });
+  // TikTok Studio can take 30-60 s to load on slow connections.
+  await waitUntil(page, async () => {
+    assertNotLoginPage(page);
+    return (await page.locator('input[type=file]').count()) > 0;
+  }, { timeout: 180000, label: 'TikTok upload page', site: SITE, shouldAbort });
+}
+
+// Read-only check: loads the uploader and confirms we are logged in. Uploads nothing.
+async function checkTikTok(page) {
+  try {
+    await openUploader(page);
+    return { ok: true, detail: 'TikTok Studio upload page reachable and logged in' };
+  } catch (e) {
+    if (e instanceof NeedsHumanError) return { ok: false, detail: e.message };
+    const ch = await detectChallenge(page);
+    return { ok: false, detail: ch ? `${ch} - solve it in Chrome` : e.message };
+  }
+}
+
+async function dismissInfoDialogs(page) {
+  for (const name of [/^got it$/i, /^not now$/i, /^ok$/i, /^skip$/i]) {
+    const b = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name });
+    // eslint-disable-next-line no-await-in-loop
+    if (await visible(b)) { await b.first().click().catch(() => {}); await sleep(800); }
+  }
+}
+
+async function uploadPhoto(page, imagePath, shouldAbort) {
+  const photosTab = page.getByText('Photos', { exact: true }).first();
+  await waitUntil(page, () => visible(photosTab), { timeout: 30000, label: 'Photos tab on the upload page', site: SITE, shouldAbort });
+  await photosTab.click();
+  const input = page.locator('input[type=file][accept*="image"]').first();
+  await waitUntil(page, async () => (await page.locator('input[type=file][accept*="image"]').count()) > 0, { timeout: 20000, label: 'photo file input', site: SITE });
+  await input.setInputFiles(imagePath);
+  await waitUntil(page, async () => (await visible(page.getByRole('button', { name: /add sound/i })))
+    && (await visible(page.locator('[data-e2e=caption_container]'))), { timeout: 120000, label: 'TikTok post editor after photo upload', site: SITE, shouldAbort });
+  await waitUntil(page, () => visible(page.getByText(/1 photo uploaded/i)), { timeout: 60000, label: '"1 photo uploaded" confirmation', site: SITE });
+  await sleep(1500);
+  await dismissInfoDialogs(page);
+}
+
+// ---------------- sound selection ----------------
+
+function collectMusic(json, source, into) {
+  const list = Array.isArray(json && json.data) ? json.data.map((d) => d.music_info || d)
+    : Array.isArray(json && json.music_list) ? json.music_list : [];
+  list.forEach((m, idx) => {
+    if (!m || !m.title) return;
+    const id = String(m.id_str || m.id || `${m.title}|${m.author}`);
+    const prev = into.get(id);
+    const tags = [...(m.tag_list || []), ...(m.tag_list_v2 || [])].map((t) => (typeof t === 'string' ? t : (t && (t.name || t.tag_name)) || '')).join(' ');
+    const entry = prev || {
+      id, title: String(m.title), author: String(m.author || m.owner_nickname || ''), userCount: Number(m.user_count) || 0,
+      duration: Number(m.duration) || 0, desc: `${m.album || ''} ${m.search_music_desc || ''} ${tags}`,
+      shootingAllowed: m.is_shooting_allow !== false, reusable: m.can_not_reuse !== true, sources: [],
+    };
+    entry.sources.push({ source, position: idx });
+    into.set(id, entry);
+  });
+}
+
+function rankSounds(candidates, { keywords, topicKeywords, recentSounds }) {
+  const want = wordSet([...keywords, ...topicKeywords].join(' '));
+  const recent = new Set((recentSounds || []).map((s) => normalize(s)));
+  return [...candidates.values()]
+    .filter((c) => c.shootingAllowed && c.reusable && c.userCount >= MIN_SOUND_USES)
+    .filter((c) => !recent.has(normalize(`${c.title} - ${c.author}`)))
+    .map((c) => {
+      const words = wordSet(`${c.title} ${c.author} ${c.desc}`);
+      let overlap = 0; for (const w of want) if (words.has(w)) overlap++;
+      const searchHits = c.sources.filter((s) => s.source.startsWith('search:')).length;
+      const topRank = Math.min(...c.sources.map((s) => s.position));
+      const recommended = c.sources.some((s) => s.source === 'recommended-for-this-photo');
+      // Relevance first (TikTok search match for our topic keywords, TikTok's own photo-based recommendation,
+      // keyword overlap), then verified popularity (number of videos using the sound).
+      const relevance = searchHits * 2 + (recommended ? 1.5 : 0) + overlap * 1.5 + (topRank < 5 ? 1 : 0);
+      return { ...c, relevance, score: relevance * 2 + Math.log10(c.userCount) };
+    })
+    .filter((c) => c.relevance > 0)
+    .sort((a, b) => b.score - a.score);
+}
+
+async function soundPanel(page) {
+  const panel = page.locator('.TUXModal-overlay').filter({ has: page.getByPlaceholder('Search sounds') });
+  return panel;
+}
+
+async function openSoundPanel(page) {
+  const panel = await soundPanel(page);
+  if (await visible(panel)) return panel;
+  const btn = page.getByRole('button', { name: /^(\+\s*)?add sound$/i }).or(page.getByRole('button', { name: /^replace$/i }));
+  await btn.first().click();
+  await waitUntil(page, () => visible(panel), { timeout: 20000, label: 'TikTok sound picker', site: SITE });
+  return panel;
+}
+
+async function closeSoundPanel(page) {
+  const panel = await soundPanel(page);
+  if (!(await visible(panel))) return;
+  await page.keyboard.press('Escape').catch(() => {});
+  await sleep(800);
+  if (await visible(panel)) {
+    const close = panel.locator('button[aria-label*="close" i], [class*="close" i]').first();
+    await close.click().catch(() => {});
+    await sleep(800);
+  }
+}
+
+async function searchSounds(page, panel, query) {
+  const input = panel.getByPlaceholder('Search sounds');
+  await input.fill('');
+  await input.fill(query);
+  await input.press('Enter');
+  await sleep(4500);
+}
+
+async function selectedSoundText(page) {
+  return page.evaluate(() => {
+    const btn = [...document.querySelectorAll('button')].find((b) => /^replace$/i.test((b.innerText || '').trim()));
+    if (!btn) return '';
+    let el = btn;
+    for (let i = 0; i < 4 && el.parentElement; i++) el = el.parentElement;
+    return el.innerText || '';
+  });
+}
+
+async function trySelectSound(page, cand, log) {
+  const panel = await openSoundPanel(page);
+  await searchSounds(page, panel, `${cand.title} ${cand.author}`.slice(0, 80));
+  const rows = panel.locator('[class*="MusicPanelMusicItem"]').filter({ hasText: cand.title });
+  const n = await rows.count();
+  for (let i = 0; i < n; i++) {
+    const row = rows.nth(i);
+    // eslint-disable-next-line no-await-in-loop
+    const text = (await row.innerText().catch(() => '')) || '';
+    if (!normalize(text).includes(normalize(cand.title)) || (cand.author && !normalize(text).includes(normalize(cand.author)))) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await row.hover().catch(() => {});
+    const use = row.getByText('Use', { exact: true }).first();
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await visible(use))) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await use.click();
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(2500);
+    // eslint-disable-next-line no-await-in-loop
+    const chosen = await selectedSoundText(page);
+    if (normalize(chosen).includes(normalize(cand.title))) return true;
+    log.warn(`Sound "${cand.title}" did not show as selected after clicking Use.`);
+    return false;
+  }
+  log.warn(`Sound "${cand.title}" by ${cand.author} not found/available in the sound picker.`);
+  return false;
+}
+
+// Picks the most relevant sound with verifiable popularity and attaches it. Never picks at random:
+// if nothing relevant with visible popularity can be attached, the post goes out without an added sound.
+async function attachSound(page, { keywords, topicKeywords, recentSounds, log }) {
+  const candidates = new Map();
+  const onResponse = async (r) => {
+    const u = r.url();
+    let source = null;
+    if (u.includes('/api/search/music/full')) {
+      try { source = `search:${new URL(u).searchParams.get('keyword') || ''}`; } catch (_) { source = 'search:'; }
+    } else if (u.includes('/music/recommend/by/video')) source = 'recommended-for-this-photo';
+    if (!source) return;
+    try { collectMusic(await r.json(), source, candidates); } catch (_) { /* ignore non-JSON */ }
+  };
+  page.on('response', onResponse);
+  try {
+    const panel = await openSoundPanel(page);
+    await sleep(4000); // TikTok loads sounds recommended for the uploaded photo
+    for (const kw of keywords.slice(0, 3)) {
+      // eslint-disable-next-line no-await-in-loop
+      await searchSounds(page, panel, kw);
+    }
+    const ranked = rankSounds(candidates, { keywords, topicKeywords, recentSounds });
+    log.info(`Sound candidates with verified popularity: ${ranked.length} (of ${candidates.size} seen).`);
+    for (const cand of ranked.slice(0, 5)) {
+      log.info(`Trying sound "${cand.title}" by ${cand.author} (used in ${fmtCount(cand.userCount)} videos, relevance ${cand.relevance.toFixed(1)}).`);
+      // eslint-disable-next-line no-await-in-loop
+      if (await trySelectSound(page, cand, log)) {
+        const via = cand.sources.some((s) => s.source.startsWith('search:')) ? `TikTok search for "${cand.sources.find((s) => s.source.startsWith('search:')).source.slice(7)}"` : 'TikTok recommendation for this photo';
+        return {
+          title: `${cand.title} - ${cand.author}`,
+          evidence: `Used in ${fmtCount(cand.userCount)} TikTok videos (TikTok sound data); matched via ${via}`,
+        };
+      }
+    }
+    return null;
+  } finally {
+    page.off('response', onResponse);
+    await closeSoundPanel(page);
+  }
+}
+
+// ---------------- caption, label, publish ----------------
+
+async function setTitle(page, title) {
+  const input = page.locator('input[placeholder="Add a catchy title"]').first();
+  if (!(await visible(input))) return false; // some accounts/videos have no separate title
+  await input.fill(title);
+  await sleep(400);
+  if ((await input.inputValue()).trim() !== title.trim()) throw new UiError('Post title did not stick in TikTok editor');
+  return true;
+}
+
+async function setDescription(page, caption, hashtags) {
+  const editor = page.locator('[data-e2e=caption_container] [contenteditable="true"]').first();
+  await waitUntil(page, () => visible(editor), { timeout: 20000, label: 'TikTok description editor', site: SITE });
+  await editor.click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Backspace');
+  await page.keyboard.type(caption, { delay: 8 });
+  await page.keyboard.type(' ', { delay: 8 });
+  for (const tag of hashtags) {
+    await page.keyboard.type(tag, { delay: 25 });
+    await sleep(700);
+    await page.keyboard.type(' ', { delay: 10 }); // space closes TikTok's hashtag suggestion list
+    await sleep(300);
+  }
+  await sleep(1000);
+  const actual = normalize(await editor.innerText());
+  const expected = normalize(`${caption} ${hashtags.join(' ')}`);
+  if (actual !== expected) {
+    throw new UiError(`Description in TikTok editor does not match the generated caption (got "${actual.slice(0, 80)}...")`);
+  }
+}
+
+async function enableAiLabel(page, log) {
+  const container = page.locator('[data-e2e=aigc_container]').first();
+  if (!(await visible(container))) {
+    const more = page.getByText(/^show more$/i).first();
+    if (await visible(more)) { await more.click(); await sleep(1000); }
+  }
+  if (!(await visible(container))) { log.warn('AI-generated content switch not found on this account.'); return false; }
+  const sw = container.locator('[aria-checked]').first();
+  if ((await sw.getAttribute('aria-checked')) !== 'true') {
+    await sw.click();
+    await sleep(1200);
+    const confirm = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name: /^(turn on|confirm|ok|got it)$/i });
+    if (await visible(confirm)) { await confirm.first().click(); await sleep(1000); }
+  }
+  const on = (await sw.getAttribute('aria-checked')) === 'true';
+  if (!on) log.warn('Could not switch on the "AI-generated content" label.');
+  return on;
+}
+
+async function ensurePostNow(page) {
+  const now = page.getByText('Now', { exact: true }).first();
+  if (await visible(now)) await now.click().catch(() => {});
+}
+
+const SUCCESS_RE = /(your (post|video|photo)s? (has been|have been|is being|was|were) (posted|published|uploaded|shared))|(posted|published|uploaded) successfully|manage your posts|view (your )?post/i;
+const FAIL_RE = /(couldn['’]t|could not|failed to|unable to) (post|publish|upload)|something went wrong|(posting|uploading) too (fast|frequently|often)|reached (the|your) (daily )?(post|upload)ing? limit|try again later/i;
+
+async function clickPostAndConfirm(page, shouldAbort) {
+  const postBtn = page.getByRole('button', { name: 'Post', exact: true }).first();
+  await waitUntil(page, async () => (await visible(postBtn)) && (await postBtn.isEnabled()) && (await postBtn.getAttribute('aria-disabled')) !== 'true',
+    { timeout: 60000, label: 'enabled Post button', site: SITE, shouldAbort });
+  const startUrl = page.url();
+  await postBtn.click();
+  const res = await waitUntil(page, async () => {
+    const confirm = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name: /^(post now|post anyway|continue|confirm)$/i });
+    if (await visible(confirm)) { await confirm.first().click().catch(() => {}); return null; }
+    const text = await page.evaluate(() => document.body.innerText).catch(() => '');
+    if (FAIL_RE.test(text)) return { ok: false, message: (text.match(FAIL_RE) || [''])[0] };
+    if (page.url() !== startUrl && /tiktokstudio\/(content|post)/.test(page.url())) return { ok: true, signal: 'redirected to Posts page' };
+    if (SUCCESS_RE.test(text)) return { ok: true, signal: (text.match(SUCCESS_RE) || [''])[0] };
+    return null;
+  }, { timeout: 180000, interval: 1000, label: 'TikTok publish confirmation', site: SITE }).catch((e) => ({ ok: false, message: e.message, timeout: true }));
+  return res;
+}
+
+// Looks for the post (by title/description) at the top of TikTok Studio's Posts list.
+async function findInPostsList(page, { title, caption }) {
+  await page.goto(CONTENT_URL, { waitUntil: 'commit', timeout: 90000 });
+  assertNotLoginPage(page);
+  const keys = [title, caption].map((s) => normalize(s).slice(0, 45)).filter((s) => s.length >= 12);
+  try {
+    await waitUntil(page, async () => {
+      const text = normalize((await page.evaluate(() => (document.querySelector('main') || document.body).innerText).catch(() => '')).slice(0, 6000));
+      return keys.some((k) => text.includes(k));
+    }, { timeout: 75000, interval: 2500, label: 'post in TikTok Posts list', site: SITE });
+    return true;
+  } catch (e) {
+    if (e instanceof NeedsHumanError) throw e;
+    return false;
+  }
+}
+
+/**
+ * Full publish flow for one photo post.
+ * hooks.beforePost() is called right before clicking Post (used to persist the "posting" state).
+ * Returns { published: boolean, unverified?: boolean, signal, sound }.
+ */
+async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, beforePost, onProgress }) {
+  onProgress('Opening TikTok Studio');
+  await openUploader(page, shouldAbort);
+  onProgress('Uploading image to TikTok');
+  await uploadPhoto(page, post.image_path, shouldAbort);
+
+  onProgress('Selecting a relevant popular sound');
+  let sound = null;
+  try {
+    sound = await attachSound(page, {
+      keywords: JSON.parse(post.music_keywords || '[]'), topicKeywords: JSON.parse(post.topic_keywords || '[]'), recentSounds, log,
+    });
+  } catch (e) {
+    if (e instanceof NeedsHumanError) throw e;
+    log.warn(`Sound selection failed: ${e.message}`);
+  }
+  if (!sound) log.warn('No relevant sound with verifiable popularity could be attached; posting without an added sound.');
+
+  onProgress('Entering caption and hashtags');
+  const hashtags = JSON.parse(post.hashtags || '[]');
+  await setTitle(page, post.title || '');
+  await setDescription(page, post.caption, hashtags);
+  await enableAiLabel(page, log);
+  await ensurePostNow(page);
+
+  onProgress('Verifying post details');
+  // Final verification of everything before publishing.
+  const desc = normalize(await page.locator('[data-e2e=caption_container] [contenteditable="true"]').first().innerText());
+  if (desc !== normalize(`${post.caption} ${hashtags.join(' ')}`)) throw new UiError('Caption changed unexpectedly before posting');
+  if (!(await visible(page.getByText(/1 photo uploaded/i)))) throw new UiError('Uploaded photo is no longer attached');
+  if (sound && !normalize(await selectedSoundText(page)).includes(normalize(sound.title.split(' - ')[0]))) {
+    log.warn('Selected sound disappeared before posting; continuing without claiming a sound.');
+    sound = null;
+  }
+
+  await beforePost(sound);
+  onProgress('Publishing');
+  const res = await clickPostAndConfirm(page, shouldAbort);
+  if (!res.ok && !res.timeout) return { published: false, failedAfterClick: true, message: `TikTok reported: ${res.message}`, sound };
+
+  onProgress('Confirming publication on TikTok');
+  let listed = false;
+  for (let i = 0; i < 3 && !listed; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    listed = await findInPostsList(page, { title: post.title, caption: post.caption });
+    // eslint-disable-next-line no-await-in-loop
+    if (!listed) await sleep(20000);
+  }
+  if (listed) return { published: true, signal: `${res.signal || 'posted'}; found in TikTok Posts list`, sound };
+  return { published: false, unverified: true, message: res.ok ? `TikTok showed "${res.signal}" but the post is not in the Posts list yet` : 'No confirmation from TikTok after clicking Post', sound };
+}
+
+module.exports = { checkTikTok, publishPhotoPost, findInPostsList, rankSounds, collectMusic, MIN_SOUND_USES };

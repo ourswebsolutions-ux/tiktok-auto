@@ -1,0 +1,25 @@
+{
+  "name": "tiktok-auto-poster",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI TikTok Auto Poster - generates content via ChatGPT web and publishes to TikTok using Chrome automation",
+  "main": "src/main/main.js",
+  "scripts": {
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "start:hidden": "electron . --hidden",
+    "check-chrome": "node scripts/check-chrome.js",
+    "test": "node --test test/*.test.js",
+    "dry-run": "node scripts/dry-run.js"
+  },
+  "dependencies": {
+    "electron": "^45.5.0",
+    "playwright-core": "^1.65.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.8"
+  }
+}
