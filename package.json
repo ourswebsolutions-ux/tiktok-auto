@@ -2,24 +2,84 @@
   "name": "tiktok-auto-poster",
   "version": "1.0.0",
   "private": true,
-  "description": "AI TikTok Auto Poster - generates content via ChatGPT web and publishes to TikTok using Chrome automation",
+  "description": "Generates TikTok photo posts with ChatGPT (text + image) and publishes them on TikTok with a relevant popular sound, using your own logged-in Chrome.",
   "main": "src/main/main.js",
   "scripts": {
     "build": "vite build",
     "start": "vite build && electron .",
     "start:hidden": "electron . --hidden",
     "check-chrome": "node scripts/check-chrome.js",
+    "dry-run": "node scripts/dry-run.js",
     "test": "node --test test/*.test.js",
-    "dry-run": "node scripts/dry-run.js"
+    "dist": "vite build && electron-builder --publish never",
+    "release": "vite build && electron-builder --publish always"
   },
   "dependencies": {
-    "electron": "^45.5.0",
+    "electron-updater": "^6.8.11",
     "playwright-core": "^1.65.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.5.0",
+    "electron-builder": "^26.18.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "vite": "^8.3.8"
+  },
+  "productName": "TikTok Auto Poster",
+  "author": {
+    "name": "ourswebsolutions-ux"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/ourswebsolutions-ux/tiktok-auto",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ourswebsolutions-ux/tiktok-auto.git"
+  },
+  "build": {
+    "appId": "io.github.ourswebsolutions-ux.tiktok-auto-poster",
+    "productName": "TikTok Auto Poster",
+    "artifactName": "TikTok-Auto-Poster-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "src/main/**",
+      "dist/**",
+      "assets/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/playwright-core/**"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "icon": "assets/icon-512.png",
+      "executableName": "tiktok-auto-poster"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon-512.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "shortcutName": "TikTok Auto Poster"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ourswebsolutions-ux",
+        "repo": "tiktok-auto",
+        "releaseType": "release"
+      }
+    ]
   }
 }

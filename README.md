@@ -1,134 +1,129 @@
 # TikTok Auto Poster
 
-Add prompts → set posts per day → **Start Automation**. For every scheduled post the app (inside your own everyday Chrome):
+Add prompts → set posts per day → **Start Automation**. For every scheduled post the app works inside **your own
+everyday Chrome** (your existing logins):
 
-1. opens **ChatGPT** and generates a fresh idea, title, caption, hashtags and a detailed image prompt (checked against earlier posts so nothing repeats),
+1. opens **ChatGPT** and generates a fresh idea, title, caption, hashtags and a detailed image prompt (checked against
+   earlier posts so nothing repeats),
 2. generates the **image** with ChatGPT's image generation and saves it locally,
-3. opens **TikTok Studio**, uploads the image as a photo post,
+3. opens **TikTok Studio** and uploads the image as a photo post,
 4. picks a **relevant, popular sound** (see below) and attaches it,
-5. enters title, caption and hashtags, switches on TikTok's *AI-generated content* label, verifies everything,
+5. enters title, caption and hashtags, switches on TikTok's *AI-generated content* label and verifies everything,
 6. clicks **Post** and only counts the post as published once it appears in your TikTok Studio *Posts* list.
 
-## Requirements
+No API keys, no paid integrations, no passwords stored.
 
-- Node.js 22+ and npm
-- Google Chrome (your normal, everyday Chrome) with remote debugging on port **9222**
-- You are logged in to chatgpt.com and tiktok.com in that Chrome
+## Download
 
-## Install
+Get the latest version from **[Releases](https://github.com/ourswebsolutions-ux/tiktok-auto/releases/latest)**:
 
-```bash
-cd "/media/ali/New Volume2/tiktok-automaticon"
-npm install
-```
+| System | File | Install |
+| --- | --- | --- |
+| Windows 10/11 | `TikTok-Auto-Poster-<version>-win-x64.exe` | Run it (one-click installer). Windows SmartScreen may warn because the app isn't code-signed: *More info → Run anyway*. |
+| Linux (x64) | `TikTok-Auto-Poster-<version>-linux-x86_64.AppImage` | `chmod +x TikTok-Auto-Poster-*.AppImage` then run it. Needs `libfuse2` (`sudo apt install libfuse2`). |
 
-## Connect your everyday Chrome
+### Automatic updates
 
-The app **never launches its own browser and never creates a profile**. It connects to the Chrome you already use
-(with Playwright `connectOverCDP`) and works in new tabs it opens and closes itself. Your other tabs, profile data and
-cookies are never touched, read or exported.
+Installed apps check GitHub for a new release on start-up and every 4 hours. A new version is downloaded in the
+background and installed automatically **as soon as the automation is idle** (never in the middle of a post); the app
+restarts and continues where it left off. The current version and update status are shown at the top of the dashboard,
+and the tray menu has *Check for Updates*.
 
-Either of these works:
+## Connect your everyday Chrome (one-time)
 
-- **Your shortcut** that starts Chrome with `--remote-debugging-port=9222`, or
-- in your Chrome open `chrome://inspect/#remote-debugging` and turn on **Allow remote debugging**
-  (this is how your Chrome is currently set up; Chrome then shows an *"Allow remote debugging?"* prompt the first
-  time the app connects – click **Allow**. The app keeps one connection open so you are not asked for every post).
+The app **never launches its own browser and never creates a profile**. It connects to the Chrome you already use via
+the DevTools protocol (Playwright `connectOverCDP`, port **9222**) and works in new tabs that it opens and closes
+itself. Your other tabs, profile data and cookies are never touched, read or exported.
 
-Check the connection at any time:
+Use either option:
 
-```bash
-npm run check-chrome
-```
+- **Recommended:** in Chrome open `chrome://inspect/#remote-debugging` and turn on **Allow remote debugging**. When the
+  app connects, Chrome asks *"Allow remote debugging?"* – click **Allow**. The app keeps that single connection open,
+  so you are asked once per app start, not for every post.
+- or start Chrome with the flag `--remote-debugging-port=9222` (note: recent Chrome versions ignore this flag for the
+  default profile, so the option above is usually needed).
 
-Expected output:
+Then make sure you are logged in to **chatgpt.com** and **tiktok.com** in that Chrome. Press *Check Chrome connection*
+in the dashboard to verify. If Chrome isn't reachable, the app shows these instructions instead of doing anything.
 
-```
-Connected. Existing tabs in your profile: N
-ChatGPT: OK - reachable and logged in
-TikTok: OK - TikTok Studio upload page reachable and logged in
-```
-
-If Chrome isn't reachable, the app shows these instructions instead of starting anything.
-
-## Start the app
-
-```bash
-npm start          # builds the dashboard and opens it
-```
-
-- Closing the window only hides it – automation keeps running in the background (tray icon: Open / Start / Stop / Quit).
-  Running `npm start` again just brings the window back.
-- On first launch the app registers itself to start automatically (hidden) when you log in
-  (`~/.config/autostart/tiktok-auto-poster.desktop`). If it was running before shutdown, it resumes the remaining posts
-  for today. Delete that file to disable auto-start.
-- GNOME note: GNOME only shows tray icons with the *AppIndicator* extension
-  (`sudo apt install gnome-shell-extension-appindicator`, then log out/in). Without it the app still runs; use
-  `npm start` to open the dashboard.
+> While remote debugging is enabled, any program on your computer can control that Chrome. Only enable it on a
+> computer you trust.
 
 ## Using it
 
-1. Add one or more prompts (they're used in rotation).
+1. Add one or more prompts (used in rotation), e.g. *"Motivational quotes for young entrepreneurs, cinematic moody visuals"*.
 2. Set **Posts per day** (1–20).
 3. Press **Start Automation**.
 
-Posting times are calculated automatically: spread evenly with a little randomness between 08:00 and 23:00, at least
-25 minutes apart. If you start late in the day, the remaining posts are fitted into the remaining time. Failed posts
-are retried (up to 3 attempts) and, if a post fails completely, a replacement slot is added (capped so it can't loop).
+Posting times are calculated automatically: spread evenly with some randomness between 08:00 and 23:00, at least
+25 minutes apart. Starting late in the day fits the remaining posts into the remaining time. Failed posts are retried
+(up to 3 attempts); a completely failed post gets a replacement slot (capped, so it can't loop).
+
+Closing the window keeps the automation running in the background (tray icon: Open / Start / Stop / Check for Updates /
+Quit). The app starts hidden when you log in to your computer and resumes the remaining posts of the day.
+On GNOME, tray icons need the *AppIndicator* extension (`sudo apt install gnome-shell-extension-appindicator`).
 
 ## How the music is chosen
 
 TikTok's sound picker loads TikTok's own data for every sound, including **how many videos use it**. The app reads that
-data (the same data the picker shows) and:
+data (exactly what the picker loads) and:
 
-- searches the sound library with the mood/genre keywords ChatGPT suggested for the post, and includes the sounds
-  TikTok recommends for the uploaded photo,
-- keeps only sounds with a verifiable usage count of at least 10,000 videos that you haven't used recently,
+- searches the sound library with mood/genre keywords ChatGPT suggested for the post, plus the sounds TikTok recommends
+  for the uploaded photo,
+- keeps only sounds with a verifiable usage count of at least 10,000 videos that weren't used recently,
 - ranks by relevance first (search match, TikTok's photo recommendation, keyword overlap), then by usage count,
-- attaches the best one, and if it can't be found or attached, tries the next.
+- attaches the best one; if it can't be found or attached, tries the next.
 
-The history shows the chosen sound and its evidence, e.g. *"Used in 5.3M TikTok videos"*. The app does not label a
-sound "trending" because TikTok doesn't expose rank-over-time data on the web. If no relevant sound with verifiable
-popularity can be attached, the post goes out without an added sound (never a random one).
+The history shows the sound and its evidence, e.g. *"Used in 294.2K TikTok videos"*. Sounds are never called
+"trending" because TikTok doesn't expose rank-over-time data on the web. If nothing relevant with verifiable popularity
+can be attached, the post goes out without an added sound – never a random one.
 
 ## Safety and reliability
 
-- Every step is checked before the next one; on any unexpected page the post is **not** published.
-- The post is marked *Publishing* in the database right before clicking Post. After a crash, restart or any error from
-  that point on, the app first checks your TikTok Posts list and never re-posts blindly.
-- Captions are unique in the database; ideas, captions, image concepts, hashtag sets, image files and sounds are
-  compared with earlier posts to avoid repeats.
-- **CAPTCHA / login / security checks** are never bypassed: the app pauses, brings the tab to the front and shows a
-  notice. After a CAPTCHA disappears it continues automatically; after logging in press **Resume**.
-- If Chrome is closed or crashes, the app waits and reconnects when Chrome (with debugging) is back.
-- ChatGPT runs in normal chats (temporary chats can't generate images), so each post creates one chat in your ChatGPT history.
+- Every step is checked before the next; on any unexpected page nothing is published (logged with a screenshot).
+- A post is marked *Publishing* right before clicking Post. After a crash, restart or error from that point on, the app
+  first checks your TikTok Posts list and never re-posts blindly. Captions are unique in the database.
+- Ideas, captions, image concepts, hashtag sets, images and sounds are compared with earlier posts to avoid repeats.
+- **CAPTCHAs, logins and security checks are never bypassed:** the app pauses, brings the tab to the front and notifies
+  you. After a CAPTCHA disappears it continues automatically; after logging in press **Resume**.
+- If Chrome is closed or crashes, the app waits and reconnects when Chrome is back.
 
-## Files
+## Limits
 
-Everything is stored in `~/.config/tiktok-auto-poster/`:
-
-| Path | Content |
-| --- | --- |
-| `app.db` | SQLite: prompts, settings, schedule, history |
-| `media/` | generated images |
-| `logs/app-YYYY-MM-DD.log` | step-by-step logs |
-| `screenshots/` | screenshots of failed steps |
-
-## Limits to be aware of
-
-- **ChatGPT Free** allows only a few image generations per day. When the limit is hit the post is postponed ~90 minutes
-  and retried; posts that can't be made before midnight are marked *Missed*. For several posts a day, a paid ChatGPT
-  plan is realistically needed.
+- **ChatGPT Free** allows only a few image generations per day. When the limit is hit the post is retried ~90 minutes
+  later; posts that can't be made before midnight are marked *Missed*. Several posts a day realistically need a paid
+  ChatGPT plan.
+- Each post creates one chat in your ChatGPT history (temporary chats can't generate images).
 - Hashtags come from ChatGPT; TikTok doesn't expose hashtag popularity in the upload editor.
-- While remote debugging is enabled, any program on this computer can control that Chrome. Only enable it on a
-  computer you trust, and turn it off when you don't need the automation.
-- Automation runs only while the computer is on and awake. TikTok's own limits and rules apply to your account.
-- If ChatGPT or TikTok change their pages, the affected step fails safely (logged with a screenshot) instead of posting
-  something wrong.
+- Automation runs only while the computer is on and awake. TikTok's limits and community guidelines apply to your
+  account – you are responsible for what you publish.
+- If ChatGPT or TikTok change their websites, the affected step fails safely; update to the latest release.
+
+## Data
+
+Stored per user (`~/.config/tiktok-auto-poster/` on Linux, `%APPDATA%\tiktok-auto-poster\` on Windows):
+`app.db` (SQLite: prompts, schedule, history), `media/` (generated images), `logs/`, `screenshots/` (failed steps).
 
 ## Development
 
 ```bash
-npm test           # unit tests (scheduler, parsing, sound ranking, duplicate guard, crash recovery)
-npm run build      # build the dashboard only
+git clone https://github.com/ourswebsolutions-ux/tiktok-auto.git
+cd tiktok-auto
+npm install
+npm start              # run from source
+npm test               # unit tests
+npm run check-chrome   # verify Chrome connection + ChatGPT/TikTok logins (read-only)
+npm run dry-run -- "your prompt"   # full pipeline, stops right before clicking Post
+npm run dist           # build installers locally into release/
 ```
+
+### Publishing a new version (auto-update for everyone)
+
+1. Bump `version` in `package.json` (e.g. `1.0.1`) and commit.
+2. `git tag v1.0.1 && git push origin main --tags`
+3. GitHub Actions (`.github/workflows/release.yml`) builds Windows + Linux and publishes the release. Installed apps
+   update themselves within a few hours.
+
+## License
+
+MIT

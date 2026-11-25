@@ -89,3 +89,4 @@ td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top
 .badge.missed, .badge.cancelled { background: #f1f1f4; color: #85858f; }
 
 @media (max-width: 860px) { .grid { grid-template-columns: 1fr 1fr 1fr; } .grid .controls { grid-column: 1 / -1; } }
+.version { font-size: 12px; color: var(--muted); margin-left: 4px; }

@@ -9,7 +9,8 @@ function enableAutostart(app, log) {
     if (process.platform === 'linux') {
       const dir = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'autostart');
       fs.mkdirSync(dir, { recursive: true });
-      const exe = process.execPath; // packaged app binary, or the electron binary in development
+      // AppImage runs from a temporary mount: start the .AppImage file itself.
+      const exe = process.env.APPIMAGE || process.execPath; // packaged binary, or the electron binary in development
       const appArg = app.isPackaged ? '' : ` "${app.getAppPath()}"`;
       const appDir = app.isPackaged ? path.dirname(exe) : app.getAppPath();
       // Wait (up to 2 min) for the drive holding the app to be mounted before launching.
@@ -19,7 +20,7 @@ function enableAutostart(app, log) {
         'Type=Application',
         'Name=TikTok Auto Poster',
         `Exec=sh -c '${cmd.replace(/'/g, "'\\''")}'`,
-        `Icon=${path.join(appDir, 'assets', 'icon.png')}`,
+        ...(app.isPackaged ? [] : [`Icon=${path.join(appDir, 'assets', 'icon.png')}`]),
         'X-GNOME-Autostart-enabled=true',
         'X-GNOME-Autostart-Delay=20',
         'Terminal=false',

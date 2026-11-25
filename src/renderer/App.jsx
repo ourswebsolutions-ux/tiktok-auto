@@ -29,6 +29,19 @@ function statusLine(state) {
   return { tone: 'off', text: 'Stopped' };
 }
 
+function updateText(appInfo) {
+  if (!appInfo) return '';
+  const u = appInfo.update;
+  const v = `v${appInfo.version}`;
+  if (!u) return v;
+  if (u.status === 'checking') return `${v} · checking for updates...`;
+  if (u.status === 'up-to-date') return `${v} · up to date`;
+  if (u.status === 'downloading') return `${v} · downloading update ${u.version || ''} ${u.progress != null ? `(${u.progress}%)` : ''}`;
+  if (u.status === 'ready') return `${v} · update ${u.version} installs automatically when idle`;
+  if (u.status === 'error') return `${v} · update check failed`;
+  return v;
+}
+
 function PromptItem({ prompt, onSave, onDelete }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(prompt.text);
@@ -118,6 +131,7 @@ export default function App() {
         <div className="brand">
           <span className="logo" aria-hidden>▶</span>
           <h1>TikTok Auto Poster</h1>
+          <span className="version" title={(state.app && state.app.update && state.app.update.message) || ''}>{updateText(state.app)}</span>
         </div>
         <div className={`status ${st.tone}`}><span className="dot" />{st.text}</div>
       </header>

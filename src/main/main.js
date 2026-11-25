@@ -11,6 +11,7 @@ const { ChromeConnection } = require('./automation/chrome');
 const { createLogger } = require('./logger');
 const { enableAutostart } = require('./autostart');
 const { MAX_DAILY } = require('./scheduler');
+const { setupAutoUpdate } = require('./updater');
 
 app.setName('tiktok-auto-poster');
 const startHidden = process.argv.includes('--hidden');
@@ -25,6 +26,7 @@ if (!app.requestSingleInstanceLock()) {
   let tray = null;
   let quitting = false;
   let engine = null;
+  let updater = null;
 
   function showWindow() {
     if (!win) {
@@ -57,10 +59,12 @@ if (!app.requestSingleInstanceLock()) {
     tray.setToolTip(`TikTok Auto Poster - ${label}`);
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: `Status: ${label}`, enabled: false },
+      { label: `Version ${app.getVersion()}${updater && updater.state.status === 'ready' ? ` (update ${updater.state.version} ready)` : ''}`, enabled: false },
       { type: 'separator' },
       { label: 'Open Dashboard', click: showWindow },
       { label: 'Start Automation', enabled: !running, click: () => engine.start() },
       { label: 'Stop Automation', enabled: running, click: () => engine.stop() },
+      { label: 'Check for Updates', enabled: !!(updater && app.isPackaged), click: () => updater.check() },
       { type: 'separator' },
       { label: 'Quit (stops automation)', click: () => { quitting = true; app.quit(); } },
     ]));
@@ -96,7 +100,7 @@ if (!app.requestSingleInstanceLock()) {
       pending = setTimeout(() => { pending = null; if (win) win.webContents.send('state:changed'); }, 150);
     });
 
-    ipcMain.handle('state:get', () => engine.snapshot());
+    ipcMain.handle('state:get', () => ({ ...engine.snapshot(), app: { version: app.getVersion(), update: updater ? updater.state : null } }));
     ipcMain.handle('prompt:add', (_e, text) => {
       const t = String(text || '').trim();
       if (!t) return { ok: false, message: 'Prompt is empty' };
@@ -125,6 +129,11 @@ if (!app.requestSingleInstanceLock()) {
       log.warn(`System tray not available: ${e.message}`);
     }
 
+    updater = setupAutoUpdate({
+      app, log, notify,
+      isBusy: () => engine.busy || ['working', 'connecting', 'stopping'].includes(engine.status.phase),
+      onChange: () => engine.emit('change'),
+    });
     enableAutostart(app, log);
     engine.init();
     if (!startHidden) showWindow();
