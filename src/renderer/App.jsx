@@ -25,6 +25,7 @@ function statusLine(state) {
   if (s.phase === 'working' || s.phase === 'connecting') return { tone: 'busy', text: s.step || 'Working...' };
   if (s.phase === 'stopping') return { tone: 'busy', text: 'Stopping...' };
   if (state.running) {
+    if (s.step && /limit reached|keep a gap/i.test(s.step)) return { tone: 'warn', text: s.step };
     if (state.schedulingMode === 'tiktok') {
       return { tone: 'ok', text: s.nextPostAt ? `Running (TikTok scheduling) - next upload for ${fmtTime(s.nextPostAt)}` : 'Running (TikTok scheduling) - today\'s posts are scheduled on TikTok' };
     }

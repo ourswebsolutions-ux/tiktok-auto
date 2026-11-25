@@ -218,6 +218,8 @@ class Engine extends EventEmitter {
           return;
         }
         if (now - this.lastRunEnd < TIKTOK_UPLOAD_PAUSE_MS) return; // short pause between uploads
+        const pausedUntil = this.chatgptPaused(next);
+        if (pausedUntil) { this.pausedStatus(pausedUntil); return; }
         await this.runPost(next);
         return;
       }
@@ -234,6 +236,8 @@ class Engine extends EventEmitter {
         this.setStatus({ phase: 'idle', step: `Waiting to keep a gap between posts (next at ${new Date(last + MIN_GAP_MS).toTimeString().slice(0, 5)})` });
         return;
       }
+      const pausedUntil = this.chatgptPaused(due);
+      if (pausedUntil) { this.pausedStatus(pausedUntil); return; }
       await this.runPost(due);
     } catch (e) {
       this.log.error(`Tick error: ${e.stack || e.message}`);
@@ -267,6 +271,18 @@ class Engine extends EventEmitter {
       }
     }
     return null;
+  }
+
+  // While ChatGPT's image limit is active, posts that still need an image wait (already generated ones continue).
+  chatgptPaused(post) {
+    const until = Number(this.store.getSetting('chatgpt_pause_until', '0')) || 0;
+    if (Date.now() >= until) return 0;
+    const needsImage = !post.caption || !post.image_path || !fs.existsSync(post.image_path);
+    return needsImage ? until : 0;
+  }
+
+  pausedStatus(until) {
+    this.setStatus({ phase: 'idle', currentPostId: null, step: `ChatGPT image limit reached - continues automatically at ${new Date(until).toTimeString().slice(0, 5)}` });
   }
 
   async runPost(post) {
@@ -402,10 +418,16 @@ class Engine extends EventEmitter {
       return false;
     }
     const shot = await screenshot(page, this.dirs.screenshots, `post-${id}-error`);
-    const msg = `${e.message.split('\n')[0]}${shot ? ` [screenshot: ${shot}]` : ''}`;
+    // Readable error: the step that failed + Playwright's "waiting for ..." target (which element), + screenshot.
+    const target = (e.message.match(/waiting for (locator\([^\n]{0,140}|getBy[^\n]{0,140})/) || [])[1];
+    const where = post.step ? `${post.step}: ` : '';
+    const msg = `${where}${e.message.split('\n')[0]}${target ? ` (waiting for ${target})` : ''}${shot ? ` [screenshot: ${shot}]` : ''}`;
     if (e instanceof RateLimitError) {
+      // ChatGPT's image/usage limit applies to every post: pause all image creation until it resets.
+      this.store.setSetting('chatgpt_pause_until', String(now + e.retryAfterMs));
       this.store.updatePost(id, { status: 'scheduled', attempts: Math.max(0, post.attempts - 1), scheduled_at: now + e.retryAfterMs, error: msg });
-      log.warn(`Rate limited, retrying at ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}: ${msg}`);
+      log.warn(`ChatGPT limit reached - image creation paused until ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}: ${msg}`);
+      this.notify('ChatGPT image limit reached', `Automation continues automatically at ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}.`);
       return false;
     }
     if (post.attempts >= MAX_ATTEMPTS) {

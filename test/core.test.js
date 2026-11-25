@@ -161,3 +161,19 @@ test('TikTok-based mode keeps 10 days scheduled ahead; software mode only today'
   assert.strictEqual(store.postsWithStatus(['scheduled']).length, posts.length, 'no duplicates when planned again');
   store.close();
 });
+
+test('ChatGPT Free image limit: reset time parsed, all image creation paused, generated posts continue', () => {
+  const { limitResetDelay } = require('../src/main/automation/chatgpt');
+  const { Engine } = require('../src/main/engine');
+  const now = new Date(2026, 10, 26, 14, 10).getTime();
+  const msg = 'There’s not enough usage available on your plan to create images right now, but more will be available after 5:59 PM.';
+  assert.strictEqual(new Date(now + limitResetDelay(msg, now)).getHours(), 18);
+  const store = new Store(tmpDb());
+  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: {}, log: { info() {}, warn() {}, error() {} } });
+  store.setSetting('chatgpt_pause_until', String(Date.now() + 3600e3));
+  assert.ok(engine.chatgptPaused({ caption: null, image_path: null }) > Date.now(), 'post needing an image waits');
+  assert.strictEqual(engine.chatgptPaused({ caption: 'x', image_path: __filename }), 0, 'already generated post continues');
+  store.setSetting('chatgpt_pause_until', String(Date.now() - 1000));
+  assert.strictEqual(engine.chatgptPaused({ caption: null, image_path: null }), 0, 'pause ends by itself');
+  store.close();
+});

@@ -1,6 +1,6 @@
 {
   "name": "tiktok-auto-poster",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "private": true,
   "description": "Generates TikTok photo posts with ChatGPT (text + image) and publishes them on TikTok with a relevant popular sound, using your own logged-in Chrome.",
   "main": "src/main/main.js",

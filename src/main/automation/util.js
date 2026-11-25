@@ -78,6 +78,17 @@ async function visible(locator) {
   return locator.first().isVisible().catch(() => false);
 }
 
+// Click that survives popups/overlays: normal click -> close popups (dismiss) and retry -> forced click.
+// Throws a readable error naming the element instead of a bare "locator.click: Timeout 30000ms exceeded".
+async function safeClick(page, locator, label, dismiss) {
+  try { await locator.click({ timeout: 10000 }); return; } catch (_) { /* try again below */ }
+  if (dismiss) await dismiss(page).catch(() => {});
+  await page.keyboard.press('Escape').catch(() => {});
+  try { await locator.click({ timeout: 10000 }); return; } catch (_) { /* last attempt below */ }
+  try { await locator.click({ timeout: 5000, force: true }); return; } catch (_) { /* give up */ }
+  throw new UiError(`Could not click ${label} (it is hidden, disabled or covered by a popup)`);
+}
+
 async function screenshot(page, dir, name) {
   if (!page || page.isClosed()) return null;
   try {
@@ -91,5 +102,5 @@ async function screenshot(page, dir, name) {
 module.exports = {
   NeedsHumanError, RateLimitError, UiError, AbortedError,
   sleep, normalize, wordSet, jaccard, sha256, captionKey,
-  detectChallenge, waitUntil, visible, screenshot,
+  detectChallenge, waitUntil, visible, safeClick, screenshot,
 };

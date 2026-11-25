@@ -8,7 +8,7 @@
 //           each with a "Use" control. TikTok's own sound data (incl. user_count = number of videos using
 //           the sound) is read passively from the responses the picker itself loads.
 
-const { NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet } = require('./util');
+const { NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet, safeClick } = require('./util');
 
 const UPLOAD_URL = 'https://www.tiktok.com/tiktokstudio/upload?from=webapp';
 const CONTENT_URL = 'https://www.tiktok.com/tiktokstudio/content';
@@ -52,10 +52,13 @@ async function dismissInfoDialogs(page) {
   }
 }
 
+// Click with popup handling and a readable error message naming the element.
+const tclick = (page, locator, label) => safeClick(page, locator, label, dismissInfoDialogs);
+
 async function uploadPhoto(page, imagePath, shouldAbort) {
   const photosTab = page.getByText('Photos', { exact: true }).first();
   await waitUntil(page, () => visible(photosTab), { timeout: 30000, label: 'Photos tab on the upload page', site: SITE, shouldAbort });
-  await photosTab.click();
+  await tclick(page, photosTab, 'TikTok "Photos" tab');
   const input = page.locator('input[type=file][accept*="image"]').first();
   await waitUntil(page, async () => (await page.locator('input[type=file][accept*="image"]').count()) > 0, { timeout: 20000, label: 'photo file input', site: SITE });
   await input.setInputFiles(imagePath);
@@ -116,7 +119,7 @@ async function openSoundPanel(page) {
   const panel = await soundPanel(page);
   if (await visible(panel)) return panel;
   const btn = page.getByRole('button', { name: /^(\+\s*)?add sound$/i }).or(page.getByRole('button', { name: /^replace$/i }));
-  await btn.first().click();
+  await tclick(page, btn.first(), 'TikTok "Add sound"');
   await waitUntil(page, () => visible(panel), { timeout: 20000, label: 'TikTok sound picker', site: SITE });
   return panel;
 }
@@ -167,7 +170,7 @@ async function trySelectSound(page, cand, log) {
     // eslint-disable-next-line no-await-in-loop
     if (!(await visible(use))) continue;
     // eslint-disable-next-line no-await-in-loop
-    await use.click();
+    try { await tclick(page, use, `"Use" for sound "${cand.title}"`); } catch (e) { log.warn(e.message); return false; }
     // eslint-disable-next-line no-await-in-loop
     await sleep(2500);
     // eslint-disable-next-line no-await-in-loop
@@ -235,7 +238,7 @@ async function setTitle(page, title) {
 async function setDescription(page, caption, hashtags) {
   const editor = page.locator('[data-e2e=caption_container] [contenteditable="true"]').first();
   await waitUntil(page, () => visible(editor), { timeout: 20000, label: 'TikTok description editor', site: SITE });
-  await editor.click();
+  await tclick(page, editor, 'TikTok description box');
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Backspace');
   await page.keyboard.type(caption, { delay: 8 });
@@ -258,12 +261,12 @@ async function enableAiLabel(page, log) {
   const container = page.locator('[data-e2e=aigc_container]').first();
   if (!(await visible(container))) {
     const more = page.getByText(/^show more$/i).first();
-    if (await visible(more)) { await more.click(); await sleep(1000); }
+    if (await visible(more)) { await tclick(page, more, 'TikTok "Show more"'); await sleep(1000); }
   }
   if (!(await visible(container))) { log.warn('AI-generated content switch not found on this account.'); return false; }
   const sw = container.locator('[aria-checked]').first();
   if ((await sw.getAttribute('aria-checked')) !== 'true') {
-    await sw.click();
+    await tclick(page, sw, 'TikTok "AI-generated content" switch');
     await sleep(1200);
     const confirm = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name: /^(turn on|confirm|ok|got it)$/i });
     if (await visible(confirm)) { await confirm.first().click(); await sleep(1000); }
@@ -305,7 +308,7 @@ async function setSchedule(page, whenMs, log) {
   const container = page.locator('[data-e2e=schedule_container]');
   const radio = container.locator('input[value=schedule]').first();
   await radio.scrollIntoViewIfNeeded().catch(() => {});
-  await container.getByText('Schedule', { exact: true }).first().click();
+  await tclick(page, container.getByText('Schedule', { exact: true }).first(), 'TikTok "Schedule" option');
   await sleep(1500);
   // One-time TikTok consent for scheduled posts.
   const allow = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name: /^allow$/i });
@@ -320,7 +323,7 @@ async function setSchedule(page, whenMs, log) {
   // Date
   const wantDate = MONTHS[d.getMonth()].slice(0, 3) + ' ' + d.getDate() + ', ' + d.getFullYear();
   if ((await pickerValue(page, 'Select date')) !== wantDate) {
-    await page.locator('.scheduled-picker [aria-label="Select date"]').click();
+    await tclick(page, page.locator('.scheduled-picker [aria-label="Select date"]'), 'TikTok schedule date');
     const panel = page.locator('.DatePicker__panel').first();
     await waitUntil(page, () => visible(panel), { timeout: 10000, label: 'TikTok date calendar', site: SITE });
     const dayLabel = MONTHS[d.getMonth()] + ' ' + ordinal(d.getDate()) + ', ' + d.getFullYear();
@@ -335,7 +338,7 @@ async function setSchedule(page, whenMs, log) {
     if ((await dayBtn.isDisabled().catch(() => false)) || (await dayBtn.getAttribute('aria-disabled')) === 'true') {
       throw new UiError('TikTok does not allow scheduling on ' + dayLabel + ' (outside TikTok\'s scheduling window)');
     }
-    await dayBtn.click();
+    await tclick(page, dayBtn, 'TikTok calendar day ' + dayLabel);
     await sleep(800);
     if (await visible(panel)) await page.keyboard.press('Escape').catch(() => {});
   }
@@ -347,13 +350,13 @@ async function setSchedule(page, whenMs, log) {
   const mm = pad2(d.getMinutes());
   const wantTime = hh + ':' + mm;
   if ((await pickerValue(page, 'Select time')) !== wantTime) {
-    await page.locator('.scheduled-picker [aria-label="Select time"]').click();
+    await tclick(page, page.locator('.scheduled-picker [aria-label="Select time"]'), 'TikTok schedule time');
     const cols = page.locator('.TimePicker__column');
     await waitUntil(page, async () => (await cols.count()) >= 2 && (await visible(cols.first())),
       { timeout: 10000, label: 'TikTok time picker', site: SITE });
-    await cols.nth(0).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + hh + '$') }).first().click();
+    await tclick(page, cols.nth(0).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + hh + '$') }).first(), 'TikTok hour ' + hh);
     await sleep(500);
-    await cols.nth(1).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + mm + '$') }).first().click();
+    await tclick(page, cols.nth(1).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + mm + '$') }).first(), 'TikTok minute ' + mm);
     await sleep(800);
     if (await visible(cols.first())) await page.keyboard.press('Escape').catch(() => {});
     await sleep(500);
@@ -378,7 +381,7 @@ async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
   await waitUntil(page, async () => (await visible(postBtn)) && (await postBtn.isEnabled()) && (await postBtn.getAttribute('aria-disabled')) !== 'true',
     { timeout: 60000, label: 'enabled ' + buttonName + ' button', site: SITE, shouldAbort });
   const startUrl = page.url();
-  await postBtn.click();
+  await tclick(page, postBtn, 'TikTok "' + buttonName + '" button');
   const res = await waitUntil(page, async () => {
     const confirm = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name: /^(post now|post anyway|continue|confirm)$/i });
     if (await visible(confirm)) { await confirm.first().click().catch(() => {}); return null; }

@@ -8,7 +8,7 @@
 // Older/alternative markup is kept as a fallback.
 
 const fs = require('fs');
-const { NeedsHumanError, RateLimitError, UiError, sleep, waitUntil, visible, detectChallenge } = require('./util');
+const { NeedsHumanError, RateLimitError, UiError, sleep, waitUntil, visible, safeClick, detectChallenge } = require('./util');
 
 // A regular chat is required: ChatGPT does not allow image generation in temporary chats.
 const CHAT_URL = 'https://chatgpt.com/';
@@ -16,7 +16,22 @@ const COMPOSER = '.ProseMirror[contenteditable="true"], #prompt-textarea, textar
 const SEND = 'button[aria-label="Send"], button[data-testid="send-button"], #composer-submit-button, button[aria-label="Send prompt"]';
 const STOP = 'button[aria-label="Stop"], button[data-testid="stop-button"], button[aria-label="Stop streaming"]';
 // Only real usage limits wait; a plain "something went wrong / try again" is retried right away.
-const LIMIT_RE = /(you['’]ve|you have) (hit|reached) (the|your)[^.]{0,60}limit|limit (resets|will reset)|reached the current usage cap|image generation (limit|quota)|upgrade to (plus|pro|go) to (create|generate|keep)/i;
+// Verified 2026-11-26 on ChatGPT Free: a "You're out of images" card and "There's not enough usage available on your plan
+// to create images right now, but more will be available after 5:59 PM."
+const LIMIT_RE = /(you['’]ve|you have) (hit|reached) (the|your)[^.]{0,60}limit|limit (resets|will reset)|reached the current usage cap|image generation (limit|quota)|upgrade to (plus|pro|go) to (create|generate|keep)|not enough usage available|you['’]re out of images|more will be available (after|at|in)/i;
+
+// "... available after 5:59 PM" -> milliseconds until then (+2 min). Falls back to 30 minutes.
+function limitResetDelay(text, now = Date.now()) {
+  const m = String(text).match(/available (?:after|at) (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!m) return 30 * 60 * 1000;
+  let h = Number(m[1]) % 24;
+  const min = Number(m[2] || 0);
+  if (m[3]) { const pm = /pm/i.test(m[3]); if (h === 12) h = pm ? 12 : 0; else if (pm) h += 12; }
+  const t = new Date(now);
+  t.setHours(h, min, 0, 0);
+  if (t.getTime() <= now) t.setDate(t.getDate() + 1);
+  return Math.min(24 * 3600e3, Math.max(5 * 60 * 1000, t.getTime() - now + 2 * 60 * 1000));
+}
 // ChatGPT-side glitches that should simply be regenerated.
 const TRANSIENT_RE = /something went wrong|an error occurred|error (while )?(generating|creating)|network error|(please )?try again|couldn['’]t (generate|create|finish)|failed to (generate|create)|unable to (generate|create) (the |an |your )?image|too many requests|timed out|is taking longer/i;
 const REFUSAL_RE = /(i can['’]t|i cannot|i['’]m unable to|i am unable to|unable to) (help|create|generate|make|fulfill)|violates? (our|the) (content )?polic/i;
@@ -28,11 +43,32 @@ async function ensureLoggedIn(page) {
   }
 }
 
+// Closes ChatGPT popups (upgrade offers, feature announcements, ...) that can cover the message box.
+const DISMISS_RE = /^(close|dismiss|not now|maybe later|no thanks|stay on (the )?free( plan)?|got it|okay|ok|skip)$/i;
+async function dismissOverlays(page) {
+  for (let i = 0; i < 3; i++) {
+    const dlg = page.locator('[role="dialog"]:visible, [data-testid="modal"]:visible').first();
+    if (!(await visible(dlg))) return;
+    const btn = dlg.getByRole('button', { name: DISMISS_RE }).first();
+    if (await visible(btn)) await btn.click({ timeout: 5000 }).catch(() => {});
+    else await page.keyboard.press('Escape').catch(() => {});
+    await sleep(800);
+  }
+}
+
+// Opens a NEW, empty chat (every post gets its own chat).
 async function openChat(page, opts = {}) {
   await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
   await waitUntil(page, () => visible(page.locator(COMPOSER)), { timeout: 60000, label: 'ChatGPT message box', site: 'ChatGPT', shouldAbort: opts.shouldAbort });
   await sleep(1500);
   await ensureLoggedIn(page);
+  await dismissOverlays(page);
+  if ((await lastTurn(page)).count > 0) {
+    // An old conversation is showing: start a new chat explicitly.
+    const newChat = page.getByRole('link', { name: /^new chat$/i }).or(page.getByRole('button', { name: /^new chat$/i })).first();
+    await safeClick(page, newChat, 'ChatGPT "New chat"', dismissOverlays);
+    await waitUntil(page, async () => (await lastTurn(page)).count === 0, { timeout: 20000, label: 'a new empty ChatGPT chat', site: 'ChatGPT' });
+  }
 }
 
 // Read-only check used by "Check Chrome" and the startup check. Sends nothing.
@@ -85,7 +121,8 @@ async function lastTurn(page) {
 
 async function typeIntoComposer(page, text) {
   const box = page.locator(COMPOSER).first();
-  await box.click();
+  await dismissOverlays(page);
+  await safeClick(page, box, 'the ChatGPT message box', dismissOverlays);
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Backspace');
   const lines = text.split('\n');
@@ -99,16 +136,34 @@ async function typeIntoComposer(page, text) {
   if (!typed.includes(probe)) throw new UiError('Could not type the message into ChatGPT');
 }
 
-// Sends a message and waits for the complete answer.
+// Clicks ChatGPT's own Retry / Try again / Regenerate button on the last answer. Returns false if there is none.
+async function clickRetry(page) {
+  const btn = page.locator('[data-talvt-turn-state]').last()
+    .getByRole('button', { name: /^(retry|try again|regenerate)$/i }).first();
+  if (!(await visible(btn))) return false;
+  await safeClick(page, btn, 'ChatGPT "Retry"', dismissOverlays);
+  return true;
+}
+
+// Sends a message (or, with text = null, presses ChatGPT's Retry button) and waits for the complete answer.
 async function ask(page, text, { timeout = 180000, expectImage = false, imageReady = () => false, shouldAbort } = {}) {
   const before = await lastTurn(page);
-  await typeIntoComposer(page, text);
-  const send = page.locator(SEND).first();
-  if (await visible(send)) {
-    await waitUntil(page, () => send.isEnabled(), { timeout: 10000, label: 'ChatGPT send button', site: 'ChatGPT' });
-    await send.click();
+  if (text === null && (await clickRetry(page))) {
+    before.count = -1; // the answer is replaced in place, the turn count does not grow
+    // Wait until ChatGPT has really started again, so the old error is not read as a new one.
+    await waitUntil(page, async () => {
+      const t = await lastTurn(page);
+      return t.state === 'in_progress' || !t.retryButton || (await visible(page.locator(STOP)));
+    }, { timeout: 20000, label: 'ChatGPT to restart the answer', site: 'ChatGPT', shouldAbort }).catch(() => {});
   } else {
-    await page.keyboard.press('Enter');
+    await typeIntoComposer(page, text === null ? 'Please regenerate the image now, following my instructions above exactly.' : text);
+    const send = page.locator(SEND).first();
+    if (await visible(send)) {
+      await waitUntil(page, () => send.isEnabled(), { timeout: 10000, label: 'ChatGPT send button', site: 'ChatGPT' });
+      await safeClick(page, send, 'the ChatGPT send button', dismissOverlays);
+    } else {
+      await page.keyboard.press('Enter');
+    }
   }
   // Wait for the answer to start.
   await waitUntil(page, async () => {
@@ -139,7 +194,7 @@ async function ask(page, text, { timeout = 180000, expectImage = false, imageRea
 
   const shown = `${result.text} ${result.turnText || ''}`;
   if (LIMIT_RE.test(shown)) {
-    throw new RateLimitError(`ChatGPT usage limit reached: ${shown.replace(/\s+/g, ' ').trim().slice(0, 160)}`, 30 * 60 * 1000);
+    throw new RateLimitError(`ChatGPT image/usage limit reached: ${shown.replace(/\s+/g, ' ').trim().slice(0, 160)}`, limitResetDelay(shown));
   }
   if (!result.error && !expectImage && TRANSIENT_RE.test(result.text) && result.text.length < 300) result.error = true;
   return result;
@@ -270,7 +325,7 @@ async function sendAndCaptureImage(page, message, { shouldAbort } = {}) {
       if (size && size.w >= 512) best = { body, size };
     }
   }
-  return { image: best, text: result.text, error: !!result.error || (!best && TRANSIENT_RE.test(`${result.text} ${result.turnText || ''}`)) };
+  return { image: best, text: result.text, retryButton: !!result.retryButton, error: !!result.error || (!best && TRANSIENT_RE.test(`${result.text} ${result.turnText || ''}`)) };
 }
 
 function saveImage(best, fileBase) {
@@ -290,13 +345,13 @@ async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicate
   let img = null;
   let lastProblem = '';
   let refusals = 0;
+  let retryButton = false;
   for (let attempt = 0; attempt < 6 && !img; attempt++) {
-    // First the prompt exactly as written; afterwards ask ChatGPT to regenerate (errors / "try again" / no image).
-    const message = attempt === 0
-      ? userPrompt
-      : 'Please regenerate the image now, following my instructions above exactly.';
+    // First the prompt exactly as written. If no image comes back: regenerate - with ChatGPT's own Retry button
+    // when it shows one, otherwise by asking for it - and check again whether an image was created.
+    const message = attempt === 0 ? userPrompt : (retryButton ? null : 'Please regenerate the image now, following my instructions above exactly.');
     if (attempt === 0) log.info('Sending your prompt to ChatGPT exactly as written');
-    else log.warn(`No image (${lastProblem || 'no image in the reply'}) - asking ChatGPT to regenerate (attempt ${attempt + 1}/6)`);
+    else log.warn(`No image (${lastProblem || 'no image in the reply'}) - ${retryButton ? 'pressing ChatGPT Retry' : 'asking ChatGPT to regenerate the image'} (attempt ${attempt + 1}/6)`);
     if (attempt > 0) {
       // eslint-disable-next-line no-await-in-loop
       await sleep(attempt * 5000);
@@ -304,6 +359,7 @@ async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicate
     // eslint-disable-next-line no-await-in-loop
     const r = await sendAndCaptureImage(page, message, { shouldAbort });
     lastProblem = r.error ? 'ChatGPT showed an error' : r.text.replace(/\s+/g, ' ').trim().slice(0, 80);
+    retryButton = r.retryButton;
     if (r.image) {
       if (isDuplicateImage && isDuplicateImage(r.image.body)) {
         log.warn('Image is identical to an earlier post; asking for a new one.');
@@ -355,4 +411,4 @@ async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicate
   throw new UiError('ChatGPT kept returning invalid or repeated post details');
 }
 
-module.exports = { checkChatGPT, openChat, generatePost, extractJson, normalizeContent, buildDetailsPrompt, imageType, imageSize };
+module.exports = { limitResetDelay, checkChatGPT, openChat, generatePost, extractJson, normalizeContent, buildDetailsPrompt, imageType, imageSize };
