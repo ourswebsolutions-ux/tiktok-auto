@@ -177,3 +177,16 @@ test('ChatGPT Free image limit: reset time parsed, all image creation paused, ge
   assert.strictEqual(engine.chatgptPaused({ caption: null, image_path: null }), 0, 'pause ends by itself');
   store.close();
 });
+
+test('TikTok schedule timezone is read from TikTok and the time converted into it', () => {
+  const { tzOffsetMinutes, wallClock } = require('../src/main/automation/tiktok');
+  assert.strictEqual(tzOffsetMinutes('(GMT+5) Local Time'), 300);
+  assert.strictEqual(tzOffsetMinutes('(GMT-3:30) St Johns'), -210);
+  assert.strictEqual(tzOffsetMinutes('(GMT) London'), 0);
+  assert.strictEqual(tzOffsetMinutes(''), null);
+  const instant = Date.UTC(2026, 10, 25, 23, 45); // 04:45 in GMT+5
+  const pk = wallClock(instant, 300);
+  assert.deepStrictEqual([pk.d, pk.h, pk.mi], [26, 4, 45]);
+  const cn = wallClock(instant, 480); // the same instant on a GMT+8 TikTok clock
+  assert.deepStrictEqual([cn.d, cn.h, cn.mi], [26, 7, 45]);
+});

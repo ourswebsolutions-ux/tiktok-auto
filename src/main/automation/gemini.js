@@ -62,7 +62,7 @@ async function lastTurn(page) {
 // Opens a NEW, empty Gemini chat (every post gets its own chat).
 async function openChat(page, opts = {}) {
   await page.goto(GEMINI_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
-  await waitUntil(page, async () => (await visible(page.locator(COMPOSER))) || (await signedOut(page)),
+  await waitUntil(page, async () => (await visible(page.locator(COMPOSER).filter({ visible: true }))) || (await signedOut(page)),
     { timeout: 60000, label: 'Gemini message box', site: 'Gemini', shouldAbort: opts.shouldAbort });
   if (await signedOut(page)) {
     throw new NeedsHumanError('Gemini is not logged in in your Chrome profile. Please sign in to gemini.google.com in Chrome.', { site: 'Gemini', page });
@@ -80,7 +80,7 @@ async function openChat(page, opts = {}) {
 async function checkGemini(page) {
   await page.goto(GEMINI_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
   try {
-    await waitUntil(page, async () => (await visible(page.locator(COMPOSER))) || (await signedOut(page)), { timeout: 45000, label: 'Gemini message box', site: 'Gemini' });
+    await waitUntil(page, async () => (await visible(page.locator(COMPOSER).filter({ visible: true }))) || (await signedOut(page)), { timeout: 45000, label: 'Gemini message box', site: 'Gemini' });
   } catch (e) {
     const ch = await detectChallenge(page);
     return { ok: false, detail: ch ? `${ch} - solve it in Chrome` : `page did not load normally (${e.message})` };
@@ -90,7 +90,7 @@ async function checkGemini(page) {
 }
 
 async function typeIntoComposer(page, text) {
-  const box = page.locator(COMPOSER).first();
+  const box = page.locator(COMPOSER).filter({ visible: true }).first();
   await dismissOverlays(page);
   await safeClick(page, box, 'the Gemini message box', dismissOverlays);
   await page.keyboard.press('Control+A');
@@ -115,7 +115,7 @@ async function ask(page, text, { timeout = 180000, expectImage = false, imageRea
     await sleep(3000);
   } else {
     await typeIntoComposer(page, text === null ? 'Please regenerate the image now, following my instructions above exactly.' : text);
-    const send = page.locator(SEND).first();
+    const send = page.locator(SEND).filter({ visible: true }).first();
     if (await visible(send)) await safeClick(page, send, 'the Gemini send button', dismissOverlays);
     else await page.keyboard.press('Enter');
   }

@@ -303,8 +303,29 @@ async function pickerValue(page, label) {
   return (await loc.innerText().catch(() => '')).trim();
 }
 
+// "(GMT+5) Local Time" -> +300 minutes; "(GMT) ..." -> 0; null if no offset is shown.
+function tzOffsetMinutes(tzText) {
+  const m = String(tzText || '').match(/GMT(?:\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?)?\)/i);
+  if (!m) return null;
+  if (!m[1]) return 0;
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0));
+}
+
+// Wall-clock date/time of an instant in TikTok's schedule timezone (falls back to this computer's timezone).
+function wallClock(ms, offsetMin) {
+  if (offsetMin === null || offsetMin === undefined) {
+    const x = new Date(ms);
+    return { y: x.getFullYear(), mo: x.getMonth(), d: x.getDate(), h: x.getHours(), mi: x.getMinutes() };
+  }
+  const x = new Date(ms + offsetMin * 60000);
+  return { y: x.getUTCFullYear(), mo: x.getUTCMonth(), d: x.getUTCDate(), h: x.getUTCHours(), mi: x.getUTCMinutes() };
+}
+
+async function isDisabled(locator) {
+  return locator.evaluate((e) => !!(e.disabled || e.getAttribute('aria-disabled') === 'true' || /disabled/i.test(String(e.className)))).catch(() => false);
+}
+
 async function setSchedule(page, whenMs, log) {
-  const d = new Date(whenMs);
   const container = page.locator('[data-e2e=schedule_container]');
   const radio = container.locator('input[value=schedule]').first();
   await radio.scrollIntoViewIfNeeded().catch(() => {});
@@ -317,8 +338,15 @@ async function setSchedule(page, whenMs, log) {
   await waitUntil(page, () => visible(page.locator('.scheduled-picker [aria-label="Select date"]')),
     { timeout: 15000, label: 'TikTok schedule date/time pickers', site: SITE });
 
+  // TikTok's schedule clock can differ from this computer's clock (account/browser timezone): convert the post
+  // time into the timezone TikTok shows, e.g. "(GMT+5) Local Time".
   const tz = await page.locator('.scheduled-picker .timezone-select input').first().inputValue().catch(() => '');
-  if (tz && !/local time/i.test(tz)) log.warn('TikTok schedule timezone is "' + tz + '" (expected Local Time).');
+  const offset = tzOffsetMinutes(tz);
+  const w = wallClock(whenMs, offset);
+  const d = { getFullYear: () => w.y, getMonth: () => w.mo, getDate: () => w.d, getHours: () => w.h, getMinutes: () => w.mi };
+  if (offset !== null && offset !== -new Date(whenMs).getTimezoneOffset()) {
+    log.warn('TikTok schedule timezone "' + tz + '" differs from this computer\'s timezone - converting the time.');
+  }
 
   // Date
   const wantDate = MONTHS[d.getMonth()].slice(0, 3) + ' ' + d.getDate() + ', ' + d.getFullYear();
@@ -349,20 +377,30 @@ async function setSchedule(page, whenMs, log) {
   const hh = pad2(d.getHours());
   const mm = pad2(d.getMinutes());
   const wantTime = hh + ':' + mm;
-  if ((await pickerValue(page, 'Select time')) !== wantTime) {
+  for (let tryNo = 0; tryNo < 3 && (await pickerValue(page, 'Select time')) !== wantTime; tryNo++) {
     await tclick(page, page.locator('.scheduled-picker [aria-label="Select time"]'), 'TikTok schedule time');
     const cols = page.locator('.TimePicker__column');
     await waitUntil(page, async () => (await cols.count()) >= 2 && (await visible(cols.first())),
       { timeout: 10000, label: 'TikTok time picker', site: SITE });
-    await tclick(page, cols.nth(0).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + hh + '$') }).first(), 'TikTok hour ' + hh);
-    await sleep(500);
-    await tclick(page, cols.nth(1).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + mm + '$') }).first(), 'TikTok minute ' + mm);
+    const hourItem = cols.nth(0).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + hh + '$') }).first();
+    const minItem = cols.nth(1).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + mm + '$') }).first();
+    if (await isDisabled(hourItem)) {
+      throw new UiError('TikTok does not allow ' + wantTime + ' on ' + wantDate + ' (TikTok clock: ' + (tz || 'unknown timezone') + ')');
+    }
+    // Wheel pickers: bring the item into view first, then click it.
+    await hourItem.scrollIntoViewIfNeeded().catch(() => {});
+    await sleep(400);
+    await tclick(page, hourItem, 'TikTok hour ' + hh);
+    await sleep(600);
+    await minItem.scrollIntoViewIfNeeded().catch(() => {});
+    await sleep(400);
+    await tclick(page, minItem, 'TikTok minute ' + mm);
     await sleep(800);
     if (await visible(cols.first())) await page.keyboard.press('Escape').catch(() => {});
     await sleep(500);
   }
   const gotTime = await pickerValue(page, 'Select time');
-  if (gotTime !== wantTime) throw new UiError('TikTok schedule time is "' + gotTime + '", expected "' + wantTime + '" (TikTok may not allow this time)');
+  if (gotTime !== wantTime) throw new UiError('TikTok schedule time is "' + gotTime + '", expected "' + wantTime + '" (TikTok clock: ' + (tz || 'unknown timezone') + ')');
   if (!(await radio.isChecked())) throw new UiError('TikTok "Schedule" option did not stay selected');
   return wantDate + ' ' + wantTime;
 }
@@ -478,4 +516,4 @@ async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, be
   return { published: false, unverified: true, message: res.ok ? `TikTok showed "${res.signal}" but the post is not in the Posts list yet${when}` : `No confirmation from TikTok after clicking ${scheduleAt ? 'Schedule' : 'Post'}`, sound, scheduledFor };
 }
 
-module.exports = { checkTikTok, publishPhotoPost, findInPostsList, rankSounds, collectMusic, tiktokScheduleTime, MIN_SOUND_USES };
+module.exports = { checkTikTok, publishPhotoPost, findInPostsList, rankSounds, collectMusic, tiktokScheduleTime, tzOffsetMinutes, wallClock, MIN_SOUND_USES };

@@ -1,7 +1,7 @@
 'use strict';
 // ChatGPT.com automation (runs inside the user's own logged-in Chrome session).
 // Selectors verified against chatgpt.com on 2026-11-25:
-//   composer:  .ProseMirror[contenteditable=true] (role=textbox)
+//   composer:  the VISIBLE .ProseMirror[contenteditable=true] (ChatGPT also renders a hidden 0x0 copy)
 //   send:      button[aria-label="Send"]
 //   turn:      [data-talvt-turn-state]  ("in_progress" while answering, "complete" when done)
 //   reply:     [data-response-body] inside the turn
@@ -59,7 +59,7 @@ async function dismissOverlays(page) {
 // Opens a NEW, empty chat (every post gets its own chat).
 async function openChat(page, opts = {}) {
   await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
-  await waitUntil(page, () => visible(page.locator(COMPOSER)), { timeout: 60000, label: 'ChatGPT message box', site: 'ChatGPT', shouldAbort: opts.shouldAbort });
+  await waitUntil(page, () => visible(page.locator(COMPOSER).filter({ visible: true })), { timeout: 60000, label: 'ChatGPT message box', site: 'ChatGPT', shouldAbort: opts.shouldAbort });
   await sleep(1500);
   await ensureLoggedIn(page);
   await dismissOverlays(page);
@@ -75,7 +75,7 @@ async function openChat(page, opts = {}) {
 async function checkChatGPT(page) {
   await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 90000 });
   try {
-    await waitUntil(page, () => visible(page.locator(COMPOSER)), { timeout: 45000, label: 'ChatGPT message box', site: 'ChatGPT' });
+    await waitUntil(page, () => visible(page.locator(COMPOSER).filter({ visible: true })), { timeout: 45000, label: 'ChatGPT message box', site: 'ChatGPT' });
   } catch (e) {
     const ch = await detectChallenge(page);
     return { ok: false, detail: ch ? `${ch} - solve it in Chrome` : `page did not load normally (${e.message})` };
@@ -120,7 +120,7 @@ async function lastTurn(page) {
 }
 
 async function typeIntoComposer(page, text) {
-  const box = page.locator(COMPOSER).first();
+  const box = page.locator(COMPOSER).filter({ visible: true }).first();
   await dismissOverlays(page);
   await safeClick(page, box, 'the ChatGPT message box', dismissOverlays);
   await page.keyboard.press('Control+A');
@@ -157,7 +157,7 @@ async function ask(page, text, { timeout = 180000, expectImage = false, imageRea
     }, { timeout: 20000, label: 'ChatGPT to restart the answer', site: 'ChatGPT', shouldAbort }).catch(() => {});
   } else {
     await typeIntoComposer(page, text === null ? 'Please regenerate the image now, following my instructions above exactly.' : text);
-    const send = page.locator(SEND).first();
+    const send = page.locator(SEND).filter({ visible: true }).first();
     if (await visible(send)) {
       await waitUntil(page, () => send.isEnabled(), { timeout: 10000, label: 'ChatGPT send button', site: 'ChatGPT' });
       await safeClick(page, send, 'the ChatGPT send button', dismissOverlays);
