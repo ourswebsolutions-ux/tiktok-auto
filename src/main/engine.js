@@ -1,6 +1,6 @@
 'use strict';
 // Automation engine: keeps the daily schedule, runs each post through
-// ChatGPT (content + image) -> TikTok (upload, sound, caption, publish, confirm), and recovers after restarts.
+// ChatGPT or Gemini (image + caption) -> TikTok (upload, sound, caption, publish, confirm), and recovers after restarts.
 
 const fs = require('fs');
 const path = require('path');
@@ -9,6 +9,13 @@ const { ACTIVE_STATUSES } = require('./db');
 const { dayKey, planDay, MIN_GAP_MS } = require('./scheduler');
 const { ChromeUnavailableError, INSTRUCTIONS } = require('./automation/chrome');
 const chatgpt = require('./automation/chatgpt');
+const gemini = require('./automation/gemini');
+
+// Image + caption generators the user can choose from (same flow, different website).
+const AI_PROVIDERS = {
+  chatgpt: { name: 'ChatGPT', generatePost: chatgpt.generatePost, check: chatgpt.checkChatGPT },
+  gemini: { name: 'Gemini', generatePost: gemini.generatePost, check: gemini.checkGemini },
+};
 const tiktok = require('./automation/tiktok');
 const {
   NeedsHumanError, RateLimitError, AbortedError, UiError, jaccard, sha256, captionKey, detectChallenge, screenshot,
@@ -108,6 +115,18 @@ class Engine extends EventEmitter {
   // 'software' = the app publishes each post at its calculated time (default).
   // 'tiktok'   = the app uploads posts ahead of time and schedules them with TikTok's own "Schedule" option
   //              for the same calculated times.
+  // Which website creates the image and caption: 'chatgpt' (default) or 'gemini'.
+  aiProvider() { return this.store.getSetting('ai_provider', 'chatgpt') === 'gemini' ? 'gemini' : 'chatgpt'; }
+
+  ai() { return AI_PROVIDERS[this.aiProvider()]; }
+
+  setAiProvider(p) {
+    this.store.setSetting('ai_provider', p === 'gemini' ? 'gemini' : 'chatgpt');
+    this.log.info(`Image + caption generator: ${this.ai().name}`);
+    this.emit('change');
+    if (this.running) setTimeout(() => this.tick(), 200);
+  }
+
   schedulingMode() { return this.store.getSetting('scheduling_mode', 'software') === 'tiktok' ? 'tiktok' : 'software'; }
 
   setSchedulingMode(mode) {
@@ -146,7 +165,7 @@ class Engine extends EventEmitter {
     if (!probe.available) return { ok: false, message: probe.reason, instructions: INSTRUCTIONS };
     try { await this.chrome.connect(); } catch (e) { return { ok: false, message: e.message, instructions: INSTRUCTIONS }; }
     const results = {};
-    for (const [name, fn] of [['chatgpt', chatgpt.checkChatGPT], ['tiktok', tiktok.checkTikTok]]) {
+    for (const [name, fn] of [['ai', this.ai().check], ['tiktok', tiktok.checkTikTok]]) {
       let page;
       try {
         // eslint-disable-next-line no-await-in-loop
@@ -160,9 +179,9 @@ class Engine extends EventEmitter {
         await this.chrome.closePage(page);
       }
     }
-    const ok = results.chatgpt.ok && results.tiktok.ok;
+    const ok = results.ai.ok && results.tiktok.ok;
     if (ok && this.status.phase === 'chrome') this.setStatus({ phase: this.running ? 'idle' : 'stopped', message: '', instructions: '' });
-    return { ok, mode: this.chrome.info && this.chrome.info.mode, chatgpt: results.chatgpt, tiktok: results.tiktok };
+    return { ok, mode: this.chrome.info && this.chrome.info.mode, aiName: this.ai().name, ai: results.ai, tiktok: results.tiktok };
   }
 
   // ---------- schedule ----------
@@ -275,14 +294,14 @@ class Engine extends EventEmitter {
 
   // While ChatGPT's image limit is active, posts that still need an image wait (already generated ones continue).
   chatgptPaused(post) {
-    const until = Number(this.store.getSetting('chatgpt_pause_until', '0')) || 0;
+    const until = Number(this.store.getSetting(`${this.aiProvider()}_pause_until`, '0')) || 0;
     if (Date.now() >= until) return 0;
     const needsImage = !post.caption || !post.image_path || !fs.existsSync(post.image_path);
     return needsImage ? until : 0;
   }
 
   pausedStatus(until) {
-    this.setStatus({ phase: 'idle', currentPostId: null, step: `ChatGPT image limit reached - continues automatically at ${new Date(until).toTimeString().slice(0, 5)}` });
+    this.setStatus({ phase: 'idle', currentPostId: null, step: `${this.ai().name} image limit reached - continues automatically at ${new Date(until).toTimeString().slice(0, 5)}` });
   }
 
   async runPost(post) {
@@ -309,9 +328,10 @@ class Engine extends EventEmitter {
         this.store.touchPrompt(prompt.id);
         this.store.updatePost(id, { prompt_id: prompt.id, prompt_text: prompt.text, caption: null, image_path: null });
         const recent = this.store.recentContent(40);
-        step('Creating image in ChatGPT from your prompt');
+        const ai = this.ai();
+        step(`Creating image in ${ai.name} from your prompt`);
         fs.mkdirSync(this.dirs.media, { recursive: true });
-        const c = await chatgpt.generatePost(page, {
+        const c = await ai.generatePost(page, {
           userPrompt: prompt.text,
           recent,
           isDuplicate: (x) => this.duplicateReason(x, recent, id),
@@ -424,10 +444,10 @@ class Engine extends EventEmitter {
     const msg = `${where}${e.message.split('\n')[0]}${target ? ` (waiting for ${target})` : ''}${shot ? ` [screenshot: ${shot}]` : ''}`;
     if (e instanceof RateLimitError) {
       // ChatGPT's image/usage limit applies to every post: pause all image creation until it resets.
-      this.store.setSetting('chatgpt_pause_until', String(now + e.retryAfterMs));
+      this.store.setSetting(`${this.aiProvider()}_pause_until`, String(now + e.retryAfterMs));
       this.store.updatePost(id, { status: 'scheduled', attempts: Math.max(0, post.attempts - 1), scheduled_at: now + e.retryAfterMs, error: msg });
-      log.warn(`ChatGPT limit reached - image creation paused until ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}: ${msg}`);
-      this.notify('ChatGPT image limit reached', `Automation continues automatically at ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}.`);
+      log.warn(`${this.ai().name} limit reached - image creation paused until ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}: ${msg}`);
+      this.notify(`${this.ai().name} image limit reached`, `Automation continues automatically at ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}.`);
       return false;
     }
     if (post.attempts >= MAX_ATTEMPTS) {
@@ -490,6 +510,7 @@ class Engine extends EventEmitter {
       status: { ...this.status, nextPostAt: next ? next.scheduled_at : null, chromeConnected: this.chrome.isConnected() },
       dailyQuantity: this.dailyQuantity(),
       schedulingMode: this.schedulingMode(),
+      aiProvider: this.aiProvider(),
       stats: this.store.stats(today),
       prompts: this.store.listPrompts(),
       history: this.store.history(150).map((h) => ({ ...h, hashtags: h.hashtags ? JSON.parse(h.hashtags) : [] })),

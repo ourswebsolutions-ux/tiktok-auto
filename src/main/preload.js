@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   deletePrompt: (id) => ipcRenderer.invoke('prompt:delete', id),
   setDailyQuantity: (n) => ipcRenderer.invoke('quantity:set', n),
   setSchedulingMode: (mode) => ipcRenderer.invoke('mode:set', mode),
+  setAiProvider: (p) => ipcRenderer.invoke('ai:set', p),
   start: () => ipcRenderer.invoke('automation:start'),
   stop: () => ipcRenderer.invoke('automation:stop'),
   resume: () => ipcRenderer.invoke('automation:resume'),

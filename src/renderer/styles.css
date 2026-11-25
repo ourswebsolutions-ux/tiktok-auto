@@ -97,3 +97,4 @@ td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top
 .segmented button + button { border-left: 1px solid var(--line); }
 .segmented button.on { background: var(--accent); color: #fff; font-weight: 600; }
 .badge.tiktok_scheduled { background: #fff0d6; color: #8a5300; }
+.mode-label { min-width: 104px; }

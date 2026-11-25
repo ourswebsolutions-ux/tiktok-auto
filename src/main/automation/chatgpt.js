@@ -340,8 +340,8 @@ function saveImage(best, fileBase) {
  *  2. in the same chat asks for title, caption, hashtags and music keywords that match that image.
  * `isDuplicate(details)` returns a reason when the post repeats earlier ones; `isDuplicateImage(buffer)` for images.
  */
-async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicateImage, fileBase, log, shouldAbort }) {
-  await openChat(page, { shouldAbort });
+async function generatePostWith(d, page, { userPrompt, recent, isDuplicate, isDuplicateImage, fileBase, log, shouldAbort }) {
+  await d.openChat(page, { shouldAbort });
   let img = null;
   let lastProblem = '';
   let refusals = 0;
@@ -350,36 +350,36 @@ async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicate
     // First the prompt exactly as written. If no image comes back: regenerate - with ChatGPT's own Retry button
     // when it shows one, otherwise by asking for it - and check again whether an image was created.
     const message = attempt === 0 ? userPrompt : (retryButton ? null : 'Please regenerate the image now, following my instructions above exactly.');
-    if (attempt === 0) log.info('Sending your prompt to ChatGPT exactly as written');
-    else log.warn(`No image (${lastProblem || 'no image in the reply'}) - ${retryButton ? 'pressing ChatGPT Retry' : 'asking ChatGPT to regenerate the image'} (attempt ${attempt + 1}/6)`);
+    if (attempt === 0) log.info(`Sending your prompt to ${d.name} exactly as written`);
+    else log.warn(`No image (${lastProblem || 'no image in the reply'}) - ${retryButton ? `pressing ${d.name} Retry` : `asking ${d.name} to regenerate the image`} (attempt ${attempt + 1}/6)`);
     if (attempt > 0) {
       // eslint-disable-next-line no-await-in-loop
       await sleep(attempt * 5000);
     }
     // eslint-disable-next-line no-await-in-loop
-    const r = await sendAndCaptureImage(page, message, { shouldAbort });
-    lastProblem = r.error ? 'ChatGPT showed an error' : r.text.replace(/\s+/g, ' ').trim().slice(0, 80);
+    const r = await d.sendAndCaptureImage(page, message, { shouldAbort });
+    lastProblem = r.error ? `${d.name} showed an error` : r.text.replace(/\s+/g, ' ').trim().slice(0, 80);
     retryButton = r.retryButton;
     if (r.image) {
       if (isDuplicateImage && isDuplicateImage(r.image.body)) {
         log.warn('Image is identical to an earlier post; asking for a new one.');
         // eslint-disable-next-line no-await-in-loop
-        const again = await sendAndCaptureImage(page, 'This exact image was already posted. Create a new, different image following my instructions above exactly.', { shouldAbort });
+        const again = await d.sendAndCaptureImage(page, 'This exact image was already posted. Create a new, different image following my instructions above exactly.', { shouldAbort });
         if (again.image && !isDuplicateImage(again.image.body)) img = again.image;
-        else throw new UiError('ChatGPT returned an image that was already posted');
+        else throw new UiError(`${d.name} returned an image that was already posted`);
       } else {
         img = r.image;
       }
     } else if (!r.error && REFUSAL_RE.test(r.text) && !TRANSIENT_RE.test(r.text) && ++refusals >= 2) {
       // A real content-policy refusal twice in a row: regenerating again will not help.
-      throw new UiError(`ChatGPT refused to create the image: ${r.text.replace(/\s+/g, ' ').slice(0, 200)}`);
+      throw new UiError(`${d.name} refused to create the image: ${r.text.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
   }
-  if (!img) throw new UiError(`ChatGPT did not create an image after 6 tries (${lastProblem})`);
+  if (!img) throw new UiError(`${d.name} did not create an image after 6 tries (${lastProblem})`);
   let saved = saveImage(img, fileBase);
   log.info(`Image saved: ${saved.file} (${saved.width}x${saved.height})`);
 
-  let reply = await ask(page, buildDetailsPrompt(recent), { shouldAbort });
+  let reply = await d.ask(page, buildDetailsPrompt(recent), { shouldAbort });
   let newImageAsked = false;
   for (let i = 0; i < 4; i++) {
     let details = null;
@@ -397,18 +397,22 @@ async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicate
       // Same concept as an earlier post: get a different image (same instructions), then new details.
       newImageAsked = true;
       // eslint-disable-next-line no-await-in-loop
-      const again = await sendAndCaptureImage(page, 'This is too similar to something I already posted. Create a new, clearly different image following my original instructions above exactly.', { shouldAbort });
-      if (!again.image) throw new UiError('ChatGPT did not create a replacement image');
+      const again = await d.sendAndCaptureImage(page, 'This is too similar to something I already posted. Create a new, clearly different image following my original instructions above exactly.', { shouldAbort });
+      if (!again.image) throw new UiError(`${d.name} did not create a replacement image`);
       fs.rmSync(saved.file, { force: true });
       saved = saveImage(again.image, fileBase);
       // eslint-disable-next-line no-await-in-loop
-      reply = await ask(page, buildDetailsPrompt(recent), { shouldAbort });
+      reply = await d.ask(page, buildDetailsPrompt(recent), { shouldAbort });
       continue;
     }
     // eslint-disable-next-line no-await-in-loop
-    reply = await ask(page, `That does not work: ${problem}. Write different details for the same image. Reply with ONLY the JSON object in a \`\`\`json code block, same keys as before.`, { shouldAbort });
+    reply = await d.ask(page, `That does not work: ${problem}. Write different details for the same image. Reply with ONLY the JSON object in a \`\`\`json code block, same keys as before.`, { shouldAbort });
   }
-  throw new UiError('ChatGPT kept returning invalid or repeated post details');
+  throw new UiError(`${d.name} kept returning invalid or repeated post details`);
 }
 
-module.exports = { limitResetDelay, checkChatGPT, openChat, generatePost, extractJson, normalizeContent, buildDetailsPrompt, imageType, imageSize };
+// The ChatGPT implementation of the shared post flow (Gemini provides its own driver in gemini.js).
+const CHATGPT_DRIVER = { name: 'ChatGPT', openChat, sendAndCaptureImage, ask };
+const generatePost = (page, opts) => generatePostWith(CHATGPT_DRIVER, page, opts);
+
+module.exports = { generatePostWith, saveImage, limitResetDelay, checkChatGPT, openChat, generatePost, extractJson, normalizeContent, buildDetailsPrompt, imageType, imageSize };

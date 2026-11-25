@@ -69,6 +69,13 @@ Closing the window keeps the automation running in the background (tray icon: Op
 Quit). The app starts hidden when you log in to your computer and resumes the remaining posts of the day.
 On GNOME, tray icons need the *AppIndicator* extension (`sudo apt install gnome-shell-extension-appindicator`).
 
+## Image & caption: ChatGPT or Gemini
+
+A switch on the dashboard selects which website creates the image and the caption: **ChatGPT** (chatgpt.com) or
+**Gemini** (gemini.google.com). Both work the same way in your own logged-in Chrome: your prompt is sent exactly as
+written in a new chat, the image is captured (regenerated automatically if it fails), then the title, caption,
+hashtags and music keywords are written for that image. Each website's own image limit is detected and waited out.
+
 ## Scheduling: Software-Based or TikTok-Based
 
 A switch on the dashboard selects how posts are scheduled. Content generation, posts per day and the calculated

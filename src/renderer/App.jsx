@@ -115,11 +115,11 @@ export default function App() {
     setNotice({ tone: 'info', title: 'Checking your Chrome, ChatGPT and TikTok...', text: 'Two tabs open briefly in your Chrome and close again. If Chrome asks "Allow remote debugging?", click Allow.' });
     try {
       const r = await api.checkChrome();
-      if (r.chatgpt) {
+      if (r.ai) {
         setNotice({
           tone: r.ok ? 'ok' : 'warn',
           title: r.ok ? 'Connected to your everyday Chrome' : 'Chrome connected, but something needs attention',
-          text: `ChatGPT: ${r.chatgpt.ok ? 'OK' : 'Problem'} - ${r.chatgpt.detail}\nTikTok: ${r.tiktok.ok ? 'OK' : 'Problem'} - ${r.tiktok.detail}`,
+          text: `${r.aiName}: ${r.ai.ok ? 'OK' : 'Problem'} - ${r.ai.detail}\nTikTok: ${r.tiktok.ok ? 'OK' : 'Problem'} - ${r.tiktok.detail}`,
         });
       } else {
         setNotice({ tone: 'warn', title: r.message, text: r.instructions });
@@ -178,6 +178,29 @@ export default function App() {
             {state.running
               ? <button className="btn stop" onClick={() => api.stop().then(refresh)}>Stop Automation</button>
               : <button className="btn primary" onClick={start} disabled={!state.prompts.length}>Start Automation</button>}
+          </div>
+          <div className="mode-row" role="radiogroup" aria-label="Image and caption by">
+            <span className="mode-label">Image &amp; caption</span>
+            <div className="segmented">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={state.aiProvider !== 'gemini'}
+                className={state.aiProvider !== 'gemini' ? 'on' : ''}
+                onClick={() => api.setAiProvider('chatgpt').then(refresh)}
+              >
+                ChatGPT
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={state.aiProvider === 'gemini'}
+                className={state.aiProvider === 'gemini' ? 'on' : ''}
+                onClick={() => api.setAiProvider('gemini').then(refresh)}
+              >
+                Gemini
+              </button>
+            </div>
           </div>
           <div className="mode-row" role="radiogroup" aria-label="Scheduling">
             <span className="mode-label">Scheduling</span>

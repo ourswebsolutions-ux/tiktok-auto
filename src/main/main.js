@@ -116,6 +116,7 @@ if (!app.requestSingleInstanceLock()) {
       const q = Math.max(1, Math.min(MAX_DAILY, Math.round(Number(n) || 1)));
       engine.setDailyQuantity(q); return { ok: true, value: q };
     });
+    ipcMain.handle('ai:set', (_e, p) => { engine.setAiProvider(p); return { ok: true, value: engine.aiProvider() }; });
     ipcMain.handle('mode:set', (_e, mode) => { engine.setSchedulingMode(mode); return { ok: true, value: engine.schedulingMode() }; });
     ipcMain.handle('automation:start', () => engine.start());
     ipcMain.handle('automation:stop', () => { engine.stop(); return { ok: true }; });

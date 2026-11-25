@@ -6,12 +6,14 @@
 //   npm run dry-run -- "your prompt"     (uses one ChatGPT image generation)
 //   options: --tiktok-schedule  also fill in TikTok's own Schedule date/time (TikTok-Based mode), ~2 hours ahead
 //            --days-ahead <n>   with --tiktok-schedule: schedule n days later (max 9)
+//            --gemini           create image + caption with Gemini instead of ChatGPT
 //            --image <file>     skip ChatGPT and use an existing image with sample caption (tests the TikTok part only)
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ChromeConnection } = require('../src/main/automation/chrome');
 const chatgpt = require('../src/main/automation/chatgpt');
+const gemini = require('../src/main/automation/gemini');
 const tiktok = require('../src/main/automation/tiktok');
 
 class DryRunStop extends Error {}
@@ -21,6 +23,7 @@ class DryRunStop extends Error {}
   const take = (flag, withValue) => { const i = args.indexOf(flag); if (i < 0) return null; const v = withValue ? args[i + 1] : true; args.splice(i, withValue ? 2 : 1); return v; };
   const tiktokSchedule = !!take('--tiktok-schedule', false);
   const existingImage = take('--image', true);
+  const useGemini = !!take('--gemini', false);
   const daysAhead = Number(take('--days-ahead', true) || 0);
   const userPrompt = args.join(' ')
     || 'Create a vertical 9:16 motivational image with the text "Start before you are ready" in bold white letters on a cinematic sunrise background.';
@@ -39,7 +42,7 @@ class DryRunStop extends Error {}
     log.info(`Prompt: ${userPrompt}`);
     const content = existingImage
       ? { image: { file: path.resolve(existingImage) }, title: 'Dry run test post', caption: 'Testing the automation flow, this is not published.', hashtags: ['#test', '#dryrun', '#automation'], music_keywords: ['calm piano'], topic_keywords: ['test'] }
-      : await chatgpt.generatePost(page, {
+      : await (useGemini ? gemini : chatgpt).generatePost(page, {
         userPrompt, recent: [], isDuplicate: () => null, isDuplicateImage: () => false, fileBase: path.join(outDir, 'image'), log,
       });
     const { image, ...details } = content;
