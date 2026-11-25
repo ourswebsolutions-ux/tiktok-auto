@@ -332,6 +332,9 @@ async function setSchedule(page, whenMs, log) {
       await sleep(600);
     }
     if (!(await visible(dayBtn))) throw new UiError('TikTok calendar does not offer ' + dayLabel);
+    if ((await dayBtn.isDisabled().catch(() => false)) || (await dayBtn.getAttribute('aria-disabled')) === 'true') {
+      throw new UiError('TikTok does not allow scheduling on ' + dayLabel + ' (outside TikTok\'s scheduling window)');
+    }
     await dayBtn.click();
     await sleep(800);
     if (await visible(panel)) await page.keyboard.press('Escape').catch(() => {});

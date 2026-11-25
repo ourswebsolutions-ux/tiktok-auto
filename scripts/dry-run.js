@@ -5,6 +5,7 @@
 //
 //   npm run dry-run -- "your prompt"     (uses one ChatGPT image generation)
 //   options: --tiktok-schedule  also fill in TikTok's own Schedule date/time (TikTok-Based mode), ~2 hours ahead
+//            --days-ahead <n>   with --tiktok-schedule: schedule n days later (max 9)
 //            --image <file>     skip ChatGPT and use an existing image with sample caption (tests the TikTok part only)
 const fs = require('fs');
 const os = require('os');
@@ -20,6 +21,7 @@ class DryRunStop extends Error {}
   const take = (flag, withValue) => { const i = args.indexOf(flag); if (i < 0) return null; const v = withValue ? args[i + 1] : true; args.splice(i, withValue ? 2 : 1); return v; };
   const tiktokSchedule = !!take('--tiktok-schedule', false);
   const existingImage = take('--image', true);
+  const daysAhead = Number(take('--days-ahead', true) || 0);
   const userPrompt = args.join(' ')
     || 'Create a vertical 9:16 motivational image with the text "Start before you are ready" in bold white letters on a cinematic sunrise background.';
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiktok-dry-run-'));
@@ -49,7 +51,7 @@ class DryRunStop extends Error {}
     try {
       await tiktok.publishPhotoPost(page, post, {
         log, recentSounds: [], onProgress: (s) => log.info(`TikTok: ${s}`),
-        scheduleAt: tiktokSchedule ? tiktok.tiktokScheduleTime(Date.now() + 2 * 3600e3) : null,
+        scheduleAt: tiktokSchedule ? tiktok.tiktokScheduleTime(Date.now() + daysAhead * 86400e3 + 2 * 3600e3) : null,
         beforePost: async (sound) => {
           log.info(`Sound: ${sound ? `${sound.title} | ${sound.evidence}` : 'none attached'}`);
           await page.screenshot({ path: path.join(outDir, 'ready-to-post.png'), fullPage: true });

@@ -77,10 +77,20 @@ posting times are the same in both modes, and automation runs continuously until
 - **Software-Based** (default): the app publishes each post itself at its calculated time.
 - **TikTok-Based**: the app generates and uploads the upcoming posts one by one right away and sets each one's time in
   TikTok's own *When to post → Schedule* option, so TikTok publishes them – even if the computer is off at that time.
+  It keeps the **next 10 days** scheduled (TikTok does not allow scheduling further ahead) and adds a new day every
+  day, so it keeps going all year as long as the app runs. Example: 12 posts/day = 120 posts queued on TikTok.
   TikTok needs a schedule time at least ~15 minutes ahead in 5-minute steps, so a time that is too close is moved to
   20 minutes from now and times are rounded up to the next 5 minutes. The history shows these posts as
   *Scheduled on TikTok*; they count as published once their time has passed. The first time, TikTok asks once to allow
   saving posts for scheduled posting – the app confirms that dialog.
+
+## Automatic retries
+
+- If ChatGPT shows an error ("Something went wrong", "Try again", no image), the app immediately asks it to
+  regenerate the image – up to 6 times – instead of waiting. Only a real usage-limit message pauses image creation
+  (re-checked every 30 minutes).
+- A failed post or upload is retried automatically after 1, 2, 5, 10 and 15 minutes (up to 6 attempts); other posts
+  keep going meanwhile. If a post still fails, a replacement post is scheduled for that day.
 
 ## How the music is chosen
 

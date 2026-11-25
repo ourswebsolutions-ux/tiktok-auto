@@ -15,7 +15,11 @@ const {
 } = require('./automation/util');
 
 const TICK_MS = 15000;
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 6;
+// Quick, growing retry delays (minutes) after a failed attempt; other posts keep going meanwhile.
+const RETRY_DELAYS_MIN = [1, 2, 5, 10, 15];
+// TikTok-based mode keeps this many days scheduled ahead (TikTok allows scheduling up to 10 days ahead).
+const TIKTOK_DAYS_AHEAD = 10;
 const VERIFY_INTERVAL_MS = 10 * 60 * 1000;
 const MAX_VERIFY_CHECKS = 12; // ~2 hours
 const TIKTOK_UPLOAD_PAUSE_MS = 60 * 1000; // TikTok-based mode: short pause between uploads
@@ -163,16 +167,26 @@ class Engine extends EventEmitter {
 
   // ---------- schedule ----------
   ensureSchedule() {
+    const now = Date.now();
     const today = dayKey();
     this.store.markOldScheduledMissed(today);
-    const posts = this.store.postsForDay(today);
-    const active = posts.filter((p) => ACTIVE_STATUSES.includes(p.status));
-    const plan = planDay({ day: today, target: this.dailyQuantity(), existingActive: active, totalAttempts: posts.length, now: Date.now() });
-    for (const id of plan.remove) this.store.deletePost(id);
-    for (const t of plan.add) this.store.createPost(today, t);
-    if (plan.add.length || plan.remove.length) {
-      this.log.info(`Schedule for ${today}: +${plan.add.length} / -${plan.remove.length} slots (${plan.add.map((t) => new Date(t).toTimeString().slice(0, 5)).join(', ')})`);
-      this.emit('change');
+    // Software-based: today only. TikTok-based: today + the next days (rolling window), so TikTok always has
+    // the coming days scheduled and a new day is added every day - continuously until Stop.
+    const days = this.schedulingMode() === 'tiktok' ? TIKTOK_DAYS_AHEAD : 1;
+    for (let i = 0; i < days; i++) {
+      const date = new Date(now);
+      date.setHours(12, 0, 0, 0);
+      date.setDate(date.getDate() + i);
+      const day = dayKey(date);
+      const posts = this.store.postsForDay(day);
+      const active = posts.filter((p) => ACTIVE_STATUSES.includes(p.status));
+      const plan = planDay({ day, target: this.dailyQuantity(), existingActive: active, totalAttempts: posts.length, now });
+      for (const id of plan.remove) this.store.deletePost(id);
+      for (const t of plan.add) this.store.createPost(day, t);
+      if (plan.add.length || plan.remove.length) {
+        this.log.info(`Schedule for ${day}: +${plan.add.length} / -${plan.remove.length} slots (${plan.add.map((t) => new Date(t).toTimeString().slice(0, 5)).join(', ')})`);
+        this.emit('change');
+      }
     }
   }
 
@@ -399,8 +413,9 @@ class Engine extends EventEmitter {
       log.error(`FAILED after ${post.attempts} attempts: ${msg}`);
       this.notify('TikTok post failed', msg.slice(0, 180));
     } else {
-      this.store.updatePost(id, { status: 'scheduled', scheduled_at: now + 10 * 60 * 1000 * post.attempts, error: msg });
-      log.warn(`Attempt ${post.attempts} failed, will retry: ${msg}`);
+      const delayMin = RETRY_DELAYS_MIN[Math.min(post.attempts, RETRY_DELAYS_MIN.length) - 1] || 1;
+      this.store.updatePost(id, { status: 'scheduled', scheduled_at: now + delayMin * 60 * 1000, error: msg });
+      log.warn(`Attempt ${post.attempts} failed, retrying in ${delayMin} min: ${msg}`);
     }
     return false;
   }

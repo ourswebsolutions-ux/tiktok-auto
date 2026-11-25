@@ -55,7 +55,7 @@ function planDay({ day, target, existingActive, totalAttempts, now, rand }) {
     return result;
   }
   if (need === 0) return result;
-  const allowed = Math.max(0, target * 2 - totalAttempts); // failed posts may be replaced, but not endlessly
+  const allowed = Math.max(0, target * 3 - totalAttempts); // failed posts are replaced, but not endlessly
   const count = Math.min(need, allowed);
   if (!count) return result;
 

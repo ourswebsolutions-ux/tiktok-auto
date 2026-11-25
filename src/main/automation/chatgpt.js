@@ -15,7 +15,10 @@ const CHAT_URL = 'https://chatgpt.com/';
 const COMPOSER = '.ProseMirror[contenteditable="true"], #prompt-textarea, textarea[name="prompt-textarea"]';
 const SEND = 'button[aria-label="Send"], button[data-testid="send-button"], #composer-submit-button, button[aria-label="Send prompt"]';
 const STOP = 'button[aria-label="Stop"], button[data-testid="stop-button"], button[aria-label="Stop streaming"]';
-const LIMIT_RE = /(you['’]ve|you have) (hit|reached) (the|your)[^.]{0,60}limit|limit (resets|will reset)|image generation (is )?(temporarily )?(unavailable|limited)|you['’]ve reached the current usage cap|too many requests|try again (later|after|in \d)/i;
+// Only real usage limits wait; a plain "something went wrong / try again" is retried right away.
+const LIMIT_RE = /(you['’]ve|you have) (hit|reached) (the|your)[^.]{0,60}limit|limit (resets|will reset)|reached the current usage cap|image generation (limit|quota)|upgrade to (plus|pro|go) to (create|generate|keep)/i;
+// ChatGPT-side glitches that should simply be regenerated.
+const TRANSIENT_RE = /something went wrong|an error occurred|error (while )?(generating|creating)|network error|(please )?try again|couldn['’]t (generate|create|finish)|failed to (generate|create)|unable to (generate|create) (the |an |your )?image|too many requests|timed out|is taking longer/i;
 const REFUSAL_RE = /(i can['’]t|i cannot|i['’]m unable to|i am unable to|unable to) (help|create|generate|make|fulfill)|violates? (our|the) (content )?polic/i;
 
 async function ensureLoggedIn(page) {
@@ -69,7 +72,14 @@ async function lastTurn(page) {
       !!(body && body.querySelector('button[aria-label*="generated image" i]'))
       || /loading images/i.test(body ? body.innerText : '')
       || [...turn.querySelectorAll('span,div,p')].some((e) => e.children.length === 0 && /^(image generated|image created)$/i.test((e.textContent || '').trim())));
-    return { count: turns.length || document.querySelectorAll('[data-message-author-role="assistant"]').length, state, hasBody: !!body, text: body ? body.innerText : '', imageLabel };
+    // Error bubbles ("Something went wrong ... Try again") can sit outside the normal reply text, with a
+    // Retry / Try again / Regenerate button.
+    const retryButton = !!turn && [...turn.querySelectorAll('button')]
+      .some((b) => /^(retry|try again|regenerate)$/i.test(((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')).trim()));
+    // Assistant side only: the user's own prompt may contain words like "try again".
+    let turnText = turn ? turn.innerText : '';
+    if (turn) turn.querySelectorAll('[data-user-message-bubble]').forEach((u) => { turnText = turnText.replace(u.innerText, ''); });
+    return { count: turns.length || document.querySelectorAll('[data-message-author-role="assistant"]').length, state, hasBody: !!body, text: body ? body.innerText : '', imageLabel, retryButton, turnText: turnText.slice(-600) };
   });
 }
 
@@ -111,23 +121,27 @@ async function ask(page, text, { timeout = 180000, expectImage = false, imageRea
   const result = await waitUntil(page, async () => {
     const t = await lastTurn(page);
     const ready = expectImage && imageReady();
-    const sig = `${t.text.length}|${t.imageLabel}|${ready}`;
+    const errorShown = !ready && !t.imageLabel && (t.retryButton || (!t.text.trim() && TRANSIENT_RE.test(t.turnText)));
+    const sig = `${t.text.length}|${t.imageLabel}|${ready}|${errorShown}`;
     if (sig !== lastSig) { lastSig = sig; stableSince = Date.now(); }
     const busy = t.state === 'in_progress' || (await visible(page.locator(STOP)));
     if (busy) return null;
     const stableFor = Date.now() - stableSince;
+    if (errorShown && stableFor > 5000) return { ...t, error: true }; // ChatGPT error: caller regenerates
     if (expectImage) {
       if (ready && stableFor > 3000) return t;
       // "Image generated" shown but the file is still loading (slow connections): keep waiting.
-      if (!t.imageLabel && t.text && stableFor > 30000) return t; // finished without an image (refusal / limit)
+      if (!t.imageLabel && t.text && stableFor > 30000) return t; // finished without an image (refusal / "try again" text)
       return null;
     }
     return t.hasBody && t.text.trim() && stableFor > 2500 ? t : null;
   }, { timeout, interval: 1000, label: expectImage ? 'ChatGPT image generation' : 'ChatGPT answer', site: 'ChatGPT', shouldAbort });
 
-  if (LIMIT_RE.test(result.text)) {
-    throw new RateLimitError(`ChatGPT usage limit reached: ${result.text.replace(/\s+/g, ' ').slice(0, 160)}`, 90 * 60 * 1000);
+  const shown = `${result.text} ${result.turnText || ''}`;
+  if (LIMIT_RE.test(shown)) {
+    throw new RateLimitError(`ChatGPT usage limit reached: ${shown.replace(/\s+/g, ' ').trim().slice(0, 160)}`, 30 * 60 * 1000);
   }
+  if (!result.error && !expectImage && TRANSIENT_RE.test(result.text) && result.text.length < 300) result.error = true;
   return result;
 }
 
@@ -256,7 +270,7 @@ async function sendAndCaptureImage(page, message, { shouldAbort } = {}) {
       if (size && size.w >= 512) best = { body, size };
     }
   }
-  return { image: best, text: result.text };
+  return { image: best, text: result.text, error: !!result.error || (!best && TRANSIENT_RE.test(`${result.text} ${result.turnText || ''}`)) };
 }
 
 function saveImage(best, fileBase) {
@@ -274,13 +288,22 @@ function saveImage(best, fileBase) {
 async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicateImage, fileBase, log, shouldAbort }) {
   await openChat(page, { shouldAbort });
   let img = null;
-  for (let attempt = 0; attempt < 3 && !img; attempt++) {
+  let lastProblem = '';
+  let refusals = 0;
+  for (let attempt = 0; attempt < 6 && !img; attempt++) {
+    // First the prompt exactly as written; afterwards ask ChatGPT to regenerate (errors / "try again" / no image).
     const message = attempt === 0
-      ? userPrompt // verbatim
-      : 'Please create the image now, following my instructions above exactly.';
-    log.info(attempt === 0 ? 'Sending your prompt to ChatGPT exactly as written' : 'No image yet - asking ChatGPT to create the image');
+      ? userPrompt
+      : 'Please regenerate the image now, following my instructions above exactly.';
+    if (attempt === 0) log.info('Sending your prompt to ChatGPT exactly as written');
+    else log.warn(`No image (${lastProblem || 'no image in the reply'}) - asking ChatGPT to regenerate (attempt ${attempt + 1}/6)`);
+    if (attempt > 0) {
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(attempt * 5000);
+    }
     // eslint-disable-next-line no-await-in-loop
     const r = await sendAndCaptureImage(page, message, { shouldAbort });
+    lastProblem = r.error ? 'ChatGPT showed an error' : r.text.replace(/\s+/g, ' ').trim().slice(0, 80);
     if (r.image) {
       if (isDuplicateImage && isDuplicateImage(r.image.body)) {
         log.warn('Image is identical to an earlier post; asking for a new one.');
@@ -291,11 +314,12 @@ async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicate
       } else {
         img = r.image;
       }
-    } else if (REFUSAL_RE.test(r.text)) {
+    } else if (!r.error && REFUSAL_RE.test(r.text) && !TRANSIENT_RE.test(r.text) && ++refusals >= 2) {
+      // A real content-policy refusal twice in a row: regenerating again will not help.
       throw new UiError(`ChatGPT refused to create the image: ${r.text.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
   }
-  if (!img) throw new UiError('ChatGPT did not create an image for this prompt');
+  if (!img) throw new UiError(`ChatGPT did not create an image after 6 tries (${lastProblem})`);
   let saved = saveImage(img, fileBase);
   log.info(`Image saved: ${saved.file} (${saved.width}x${saved.height})`);
 

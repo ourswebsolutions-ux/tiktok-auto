@@ -203,7 +203,7 @@ export default function App() {
           </div>
           <p className="hint">
             {state.schedulingMode === 'tiktok'
-              ? 'Posts are uploaded one by one ahead of time and scheduled on TikTok for the calculated times (spread across 24 hours).'
+              ? 'Posts are uploaded one by one and scheduled on TikTok for the calculated times. The next 10 days (TikTok\'s maximum) are kept scheduled and a new day is added every day.'
               : 'Posting times are calculated automatically and spread across the full 24 hours.'}
             {' '}<button className="link" disabled={checking} onClick={check}>{checking ? 'Checking...' : 'Check Chrome connection'}</button>
           </p>

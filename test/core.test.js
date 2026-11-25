@@ -41,7 +41,7 @@ test('planDay: full day, late start, reduce quantity, replacement cap', () => {
   const c = planDay({ day, target: 3, existingActive: existing, totalAttempts: 5, now: morning });
   assert.deepStrictEqual(c.remove.sort(), [4, 5]);
 
-  const d = planDay({ day, target: 3, existingActive: [], totalAttempts: 6, now: morning });
+  const d = planDay({ day, target: 3, existingActive: [], totalAttempts: 9, now: morning });
   assert.strictEqual(d.add.length, 0, 'no endless replacement of failed posts');
 });
 
@@ -137,4 +137,27 @@ test('TikTok schedule time: 5-minute steps and at least 20 minutes ahead', () =>
   const now = new Date(2026, 10, 26, 10, 0).getTime();
   assert.strictEqual(new Date(tiktokScheduleTime(new Date(2026, 10, 26, 15, 7).getTime(), now)).getMinutes(), 10);
   assert.strictEqual(tiktokScheduleTime(now + 60e3, now), now + 20 * 60e3);
+});
+
+test('TikTok-based mode keeps 10 days scheduled ahead; software mode only today', () => {
+  const { Engine } = require('../src/main/engine');
+  const store = new Store(tmpDb());
+  store.setSetting('daily_quantity', '12');
+  const log = { info() {}, warn() {}, error() {} };
+  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: {}, log });
+  store.setSetting('scheduling_mode', 'software');
+  engine.ensureSchedule();
+  const daysSoftware = new Set(store.postsWithStatus(['scheduled']).map((p) => p.day));
+  assert.strictEqual(daysSoftware.size <= 1, true);
+  store.setSetting('scheduling_mode', 'tiktok');
+  engine.ensureSchedule();
+  const posts = store.postsWithStatus(['scheduled']);
+  const perDay = {};
+  posts.forEach((p) => { perDay[p.day] = (perDay[p.day] || 0) + 1; });
+  const days = Object.keys(perDay).sort();
+  assert.ok(days.length >= 9 && days.length <= 10, 'rolling window of 10 days');
+  days.slice(1).forEach((d) => assert.strictEqual(perDay[d], 12, 'future days get the full daily quantity'));
+  engine.ensureSchedule();
+  assert.strictEqual(store.postsWithStatus(['scheduled']).length, posts.length, 'no duplicates when planned again');
+  store.close();
 });
