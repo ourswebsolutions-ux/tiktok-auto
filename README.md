@@ -55,8 +55,9 @@ in the dashboard to verify. If Chrome isn't reachable, the app shows these instr
 2. Set **Posts per day** (1–20).
 3. Press **Start Automation**.
 
-Posting times are calculated automatically: spread evenly with some randomness between 08:00 and 23:00, at least
-25 minutes apart. Starting late in the day fits the remaining posts into the remaining time. Failed posts are retried
+Posting times are calculated automatically across the **full 24 hours** – no fixed posting hours. Example: 6 posts a
+day ≈ one post every 4 hours (with a little randomness), at least 25 minutes apart. Starting in the middle of the day
+spreads the remaining posts over the remaining hours. Failed posts are retried
 (up to 3 attempts); a completely failed post gets a replacement slot (capped, so it can't loop).
 
 Closing the window keeps the automation running in the background (tray icon: Open / Start / Stop / Check for Updates /

@@ -1,9 +1,8 @@
 'use strict';
-// Pure scheduling helpers: spread N posts across the day at reasonable, slightly randomised intervals.
+// Pure scheduling helpers: spread N posts across the full 24 hours of the day at even,
+// slightly randomised intervals (no fixed posting hours).
 
-const WINDOW_START_HOUR = 8;   // first post not before 08:00
-const WINDOW_END_HOUR = 23;    // aim to finish by 23:00
-const HARD_END_MIN = 23 * 60 + 45; // never schedule after 23:45
+const DAY_END_MIN = 24 * 60 - 5; // last possible slot of a day: 23:55
 const MIN_GAP_MS = 25 * 60 * 1000; // at least 25 minutes between posts
 const MAX_DAILY = 20;
 
@@ -61,11 +60,9 @@ function planDay({ day, target, existingActive, totalAttempts, now, rand }) {
   if (!count) return result;
 
   const lastActive = existingActive.reduce((m, p) => Math.max(m, p.published_at || p.scheduled_at || 0), 0);
-  const from = Math.max(now + 2 * 60 * 1000, atLocal(day, WINDOW_START_HOUR * 60), lastActive ? lastActive + MIN_GAP_MS : 0);
-  const hardEnd = atLocal(day, HARD_END_MIN);
-  let to = atLocal(day, WINDOW_END_HOUR * 60);
-  // Late start: stretch toward the hard end so the daily target can still be met.
-  if (to - from < count * MIN_GAP_MS) to = Math.min(hardEnd, from + count * MIN_GAP_MS);
+  // Whole day (00:00-23:55); when started mid-day, the remaining posts are spread over the remaining hours.
+  const from = Math.max(now + 2 * 60 * 1000, atLocal(day, 0), lastActive ? lastActive + MIN_GAP_MS : 0);
+  const to = atLocal(day, DAY_END_MIN);
   if (to <= from) return result;
   result.add = planTimes(count, from, to, { rand });
   return result;

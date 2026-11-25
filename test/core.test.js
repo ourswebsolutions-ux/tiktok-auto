@@ -13,7 +13,7 @@ const { captionKey, jaccard } = require('../src/main/automation/util');
 const tmpDb = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'tap-')), 'test.db');
 
 test('planTimes spreads posts with minimum gaps inside the window', () => {
-  const from = atLocal('2026-11-25', 8 * 60); const to = atLocal('2026-11-25', 23 * 60);
+  const from = atLocal('2026-11-25', 0); const to = atLocal('2026-11-25', 24 * 60 - 5);
   for (const n of [1, 3, 5, 10, 20]) {
     const t = planTimes(n, from, to);
     assert.strictEqual(t.length, n);
@@ -23,15 +23,19 @@ test('planTimes spreads posts with minimum gaps inside the window', () => {
 
 test('planDay: full day, late start, reduce quantity, replacement cap', () => {
   const day = '2026-11-25';
-  const morning = atLocal(day, 7 * 60);
-  const a = planDay({ day, target: 5, existingActive: [], totalAttempts: 0, now: morning });
-  assert.strictEqual(a.add.length, 5);
-  assert.ok(Math.min(...a.add) >= atLocal(day, 8 * 60));
+  const midnight = atLocal(day, 0);
+  const a = planDay({ day, target: 6, existingActive: [], totalAttempts: 0, now: midnight });
+  assert.strictEqual(a.add.length, 6);
+  assert.ok(Math.min(...a.add) < atLocal(day, 4 * 60), 'first post in the night hours: whole 24h are used');
+  assert.ok(Math.max(...a.add) > atLocal(day, 20 * 60), 'last post late in the evening');
+  const gaps = a.add.slice(1).map((t, i) => t - a.add[i]);
+  assert.ok(Math.min(...gaps) >= 2 * 3600e3, 'roughly every 4 hours for 6 posts');
 
-  const late = atLocal(day, 22 * 60 + 30); // 22:30, 4 posts still fit before 23:45 with 25-min gaps? only 3
+  const late = atLocal(day, 22 * 60 + 30); // 22:30: remaining posts squeezed into the remaining time
   const b = planDay({ day, target: 4, existingActive: [], totalAttempts: 0, now: late });
-  assert.ok(b.add.length >= 2 && b.add.length <= 4);
-  assert.ok(Math.max(...b.add) <= atLocal(day, 23 * 60 + 45));
+  assert.ok(b.add.length >= 2 && b.add.length <= 3);
+  assert.ok(Math.max(...b.add) <= atLocal(day, 23 * 60 + 55));
+  const morning = atLocal(day, 7 * 60);
 
   const existing = [1, 2, 3, 4, 5].map((i) => ({ id: i, status: 'scheduled', scheduled_at: morning + i * 3600e3 }));
   const c = planDay({ day, target: 3, existingActive: existing, totalAttempts: 5, now: morning });

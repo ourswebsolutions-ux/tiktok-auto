@@ -175,7 +175,7 @@ export default function App() {
               : <button className="btn primary" onClick={start} disabled={!state.prompts.length}>Start Automation</button>}
           </div>
           <p className="hint">
-            Posting times are spread automatically between 08:00 and 23:00.
+            Posting times are calculated automatically and spread across the full 24 hours.
             {' '}<button className="link" disabled={checking} onClick={check}>{checking ? 'Checking...' : 'Check Chrome connection'}</button>
           </p>
         </div>
