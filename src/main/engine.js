@@ -18,6 +18,7 @@ const TICK_MS = 15000;
 const MAX_ATTEMPTS = 3;
 const VERIFY_INTERVAL_MS = 10 * 60 * 1000;
 const MAX_VERIFY_CHECKS = 12; // ~2 hours
+const TIKTOK_UPLOAD_PAUSE_MS = 60 * 1000; // TikTok-based mode: short pause between uploads
 const BROWSER_GONE_RE = /Target (page, context or browser )?(has been )?closed|Browser has been closed|browser has disconnected|has been disconnected|Connection closed|WebSocket is not open/i;
 
 class Engine extends EventEmitter {
@@ -32,6 +33,7 @@ class Engine extends EventEmitter {
     this.busy = false;
     this.abortRequested = false;
     this.attention = null; // { message, kind, page }
+    this.lastRunEnd = 0;
     this.status = { phase: 'stopped', step: '', message: '', instructions: '', currentPostId: null };
   }
 
@@ -97,6 +99,18 @@ class Engine extends EventEmitter {
     this.store.setSetting('daily_quantity', String(n));
     if (this.running) this.ensureSchedule();
     this.emit('change');
+  }
+
+  // 'software' = the app publishes each post at its calculated time (default).
+  // 'tiktok'   = the app uploads posts ahead of time and schedules them with TikTok's own "Schedule" option
+  //              for the same calculated times.
+  schedulingMode() { return this.store.getSetting('scheduling_mode', 'software') === 'tiktok' ? 'tiktok' : 'software'; }
+
+  setSchedulingMode(mode) {
+    this.store.setSetting('scheduling_mode', mode === 'tiktok' ? 'tiktok' : 'software');
+    this.log.info(`Scheduling mode: ${this.schedulingMode() === 'tiktok' ? 'TikTok-based (TikTok schedules the posts)' : 'Software-based'}`);
+    this.emit('change');
+    if (this.running) setTimeout(() => this.tick(), 200);
   }
 
   resumeAfterAttention() {
@@ -178,6 +192,21 @@ class Engine extends EventEmitter {
       const now = Date.now();
       const toVerify = this.store.postsWithStatus(['unverified']).find((p) => p.scheduled_at <= now);
       if (toVerify) { await this.verifyPost(toVerify); return; }
+
+      if (this.store.promoteDueTikTokScheduled(now)) this.emit('change');
+
+      if (this.schedulingMode() === 'tiktok') {
+        // TikTok-based: upload the upcoming posts one by one right away; TikTok publishes them at their times.
+        const next = this.store.nextTikTokCandidate(now);
+        if (!next) {
+          const later = this.store.nextScheduledPost();
+          this.setStatus({ phase: 'idle', step: '', currentPostId: null, nextPostAt: later ? later.scheduled_at : null });
+          return;
+        }
+        if (now - this.lastRunEnd < TIKTOK_UPLOAD_PAUSE_MS) return; // short pause between uploads
+        await this.runPost(next);
+        return;
+      }
 
       const due = this.store.nextDuePost(now);
       if (!due) {
@@ -271,7 +300,7 @@ class Engine extends EventEmitter {
       this.checkAbort();
 
       // 2) Daily cap guard (never more than the target per day).
-      const today = this.store.postsForDay(p.day).filter((x) => ['posting', 'unverified', 'published'].includes(x.status)).length;
+      const today = this.store.postsForDay(p.day).filter((x) => ['posting', 'unverified', 'published', 'tiktok_scheduled'].includes(x.status)).length;
       if (today >= this.dailyQuantity()) {
         this.store.updatePost(id, { status: 'cancelled', step: '', error: 'Daily target already reached' });
         return;
@@ -281,18 +310,24 @@ class Engine extends EventEmitter {
       this.store.updatePost(id, { status: 'uploading' });
       p = this.store.getPost(id);
       const recentSounds = this.store.recentContent(10).map((r) => r.sound_title).filter(Boolean);
+      // TikTok-based scheduling: same calculated time, adjusted to TikTok's rules (>= 20 min ahead, 5-minute steps).
+      const scheduleAt = this.schedulingMode() === 'tiktok' ? tiktok.tiktokScheduleTime(p.scheduled_at) : null;
       const res = await tiktok.publishPhotoPost(page, p, {
         log,
         shouldAbort: () => this.shouldAbort(),
         recentSounds,
         onProgress: step,
+        scheduleAt,
         beforePost: async (sound) => {
-          // Persist BEFORE clicking Post: after a crash we verify instead of re-posting.
+          // Persist BEFORE clicking Post/Schedule: after a crash we verify instead of re-posting.
           // The unique index on caption_key throws if this caption was already posted.
-          this.store.updatePost(id, { status: 'posting', published_at: Date.now(), sound_title: sound ? sound.title : null, sound_evidence: sound ? sound.evidence : 'No sound added (none relevant with verifiable popularity could be attached)' });
+          this.store.updatePost(id, { status: 'posting', published_at: scheduleAt || Date.now(), sound_title: sound ? sound.title : null, sound_evidence: sound ? sound.evidence : 'No sound added (none relevant with verifiable popularity could be attached)' });
         },
       });
-      if (res.published) {
+      if (res.published && scheduleAt) {
+        this.store.updatePost(id, { status: 'tiktok_scheduled', step: res.signal, error: null });
+        log.info(`SCHEDULED ON TIKTOK for ${new Date(scheduleAt).toLocaleString()} (${res.signal})`);
+      } else if (res.published) {
         this.store.updatePost(id, { status: 'published', step: res.signal, error: null });
         log.info(`PUBLISHED (${res.signal})`);
         this.notify('Post published on TikTok', p.title || p.caption);
@@ -311,6 +346,7 @@ class Engine extends EventEmitter {
       keepPage = await this.handleError(id, e, page, log);
     } finally {
       if (page && !keepPage) await this.chrome.closePage(page);
+      this.lastRunEnd = Date.now();
       this.setStatus({ phase: this.attention ? 'attention' : (this.running ? 'idle' : 'stopped'), step: this.attention ? this.status.step : '', currentPostId: null });
     }
   }
@@ -376,10 +412,17 @@ class Engine extends EventEmitter {
     try {
       page = await this.chrome.newPage();
       const listed = await tiktok.findInPostsList(page, { title: post.title, caption: post.caption });
-      if (listed) {
+      const scheduledLater = post.published_at && post.published_at > Date.now(); // scheduled on TikTok for later
+      if (listed && scheduledLater) {
+        this.store.updatePost(id, { status: 'tiktok_scheduled', error: null, step: 'Confirmed in TikTok Posts list (scheduled)' });
+        this.log.info(`[post ${id}] Confirmed as scheduled on TikTok.`);
+      } else if (listed) {
         this.store.updatePost(id, { status: 'published', published_at: post.published_at || post.updated_at, error: null, step: 'Confirmed in TikTok Posts list' });
         this.log.info(`[post ${id}] Confirmed as published.`);
         this.notify('Post published on TikTok', post.title || post.caption || '');
+      } else if (scheduledLater) {
+        // TikTok may only list a scheduled post once it is live: keep checking without using up the check limit.
+        this.store.updatePost(id, { scheduled_at: Math.max(Date.now() + VERIFY_INTERVAL_MS, post.published_at + 5 * 60 * 1000) });
       } else if (post.verify_checks + 1 >= MAX_VERIFY_CHECKS) {
         this.store.updatePost(id, { status: 'failed', error: 'Could not confirm on TikTok after 2 hours - please check your TikTok profile', step: '' });
       } else {
@@ -409,6 +452,7 @@ class Engine extends EventEmitter {
       running: this.running,
       status: { ...this.status, nextPostAt: next ? next.scheduled_at : null, chromeConnected: this.chrome.isConnected() },
       dailyQuantity: this.dailyQuantity(),
+      schedulingMode: this.schedulingMode(),
       stats: this.store.stats(today),
       prompts: this.store.listPrompts(),
       history: this.store.history(150).map((h) => ({ ...h, hashtags: h.hashtags ? JSON.parse(h.hashtags) : [] })),

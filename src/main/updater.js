@@ -1,11 +1,11 @@
 'use strict';
 // Auto-update from GitHub Releases (installed builds only: Windows installer, Linux AppImage).
-// Checks on startup and every 4 hours, downloads in the background and installs only while the
+// Checks on startup and every minute, downloads in the background and installs only while the
 // automation is idle, so a post is never interrupted. After restarting, automation resumes by itself.
 
 const { autoUpdater } = require('electron-updater');
 
-const CHECK_EVERY_MS = 4 * 60 * 60 * 1000;
+const CHECK_EVERY_MS = 60 * 1000; // every minute
 const FIRST_CHECK_DELAY_MS = 20 * 1000;
 
 function setupAutoUpdate({ app, log, notify, isBusy, onChange }) {
@@ -22,7 +22,8 @@ function setupAutoUpdate({ app, log, notify, isBusy, onChange }) {
   }
 
   autoUpdater.logger = {
-    info: (m) => log.info(`[updater] ${m}`),
+    // Checks run every minute: keep routine "checking / no update" messages out of the log.
+    info: (m) => { if (!/^(Checking for update|Update for version .* is not available)/i.test(String(m))) log.info(`[updater] ${m}`); },
     warn: (m) => log.warn(`[updater] ${m}`),
     error: (m) => log.error(`[updater] ${m}`),
     debug: () => {},

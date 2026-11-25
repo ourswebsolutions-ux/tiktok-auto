@@ -9,6 +9,7 @@ const STATUS_LABELS = {
   uploading: 'Uploading',
   posting: 'Publishing',
   unverified: 'Confirming',
+  tiktok_scheduled: 'Scheduled on TikTok',
   failed: 'Failed',
   missed: 'Missed',
   cancelled: 'Cancelled',
@@ -24,6 +25,9 @@ function statusLine(state) {
   if (s.phase === 'working' || s.phase === 'connecting') return { tone: 'busy', text: s.step || 'Working...' };
   if (s.phase === 'stopping') return { tone: 'busy', text: 'Stopping...' };
   if (state.running) {
+    if (state.schedulingMode === 'tiktok') {
+      return { tone: 'ok', text: s.nextPostAt ? `Running (TikTok scheduling) - next upload for ${fmtTime(s.nextPostAt)}` : 'Running (TikTok scheduling) - today\'s posts are scheduled on TikTok' };
+    }
     return { tone: 'ok', text: s.nextPostAt ? `Running - next post at ${fmtTime(s.nextPostAt)}` : (s.step || 'Running - daily target reached') };
   }
   return { tone: 'off', text: 'Stopped' };
@@ -174,8 +178,33 @@ export default function App() {
               ? <button className="btn stop" onClick={() => api.stop().then(refresh)}>Stop Automation</button>
               : <button className="btn primary" onClick={start} disabled={!state.prompts.length}>Start Automation</button>}
           </div>
+          <div className="mode-row" role="radiogroup" aria-label="Scheduling">
+            <span className="mode-label">Scheduling</span>
+            <div className="segmented">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={state.schedulingMode !== 'tiktok'}
+                className={state.schedulingMode !== 'tiktok' ? 'on' : ''}
+                onClick={() => api.setSchedulingMode('software').then(refresh)}
+              >
+                Software-Based
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={state.schedulingMode === 'tiktok'}
+                className={state.schedulingMode === 'tiktok' ? 'on' : ''}
+                onClick={() => api.setSchedulingMode('tiktok').then(refresh)}
+              >
+                TikTok-Based
+              </button>
+            </div>
+          </div>
           <p className="hint">
-            Posting times are calculated automatically and spread across the full 24 hours.
+            {state.schedulingMode === 'tiktok'
+              ? 'Posts are uploaded one by one ahead of time and scheduled on TikTok for the calculated times (spread across 24 hours).'
+              : 'Posting times are calculated automatically and spread across the full 24 hours.'}
             {' '}<button className="link" disabled={checking} onClick={check}>{checking ? 'Checking...' : 'Check Chrome connection'}</button>
           </p>
         </div>

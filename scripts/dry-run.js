@@ -4,6 +4,8 @@
 // The TikTok tab is then closed, which discards the draft. Nothing is published.
 //
 //   npm run dry-run -- "your prompt"     (uses one ChatGPT image generation)
+//   options: --tiktok-schedule  also fill in TikTok's own Schedule date/time (TikTok-Based mode), ~2 hours ahead
+//            --image <file>     skip ChatGPT and use an existing image with sample caption (tests the TikTok part only)
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -15,6 +17,9 @@ class DryRunStop extends Error {}
 
 (async () => {
   const args = process.argv.slice(2);
+  const take = (flag, withValue) => { const i = args.indexOf(flag); if (i < 0) return null; const v = withValue ? args[i + 1] : true; args.splice(i, withValue ? 2 : 1); return v; };
+  const tiktokSchedule = !!take('--tiktok-schedule', false);
+  const existingImage = take('--image', true);
   const userPrompt = args.join(' ')
     || 'Create a vertical 9:16 motivational image with the text "Start before you are ready" in bold white letters on a cinematic sunrise background.';
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiktok-dry-run-'));
@@ -30,9 +35,11 @@ class DryRunStop extends Error {}
   try {
     page = await chrome.newPage();
     log.info(`Prompt: ${userPrompt}`);
-    const content = await chatgpt.generatePost(page, {
-      userPrompt, recent: [], isDuplicate: () => null, isDuplicateImage: () => false, fileBase: path.join(outDir, 'image'), log,
-    });
+    const content = existingImage
+      ? { image: { file: path.resolve(existingImage) }, title: 'Dry run test post', caption: 'Testing the automation flow, this is not published.', hashtags: ['#test', '#dryrun', '#automation'], music_keywords: ['calm piano'], topic_keywords: ['test'] }
+      : await chatgpt.generatePost(page, {
+        userPrompt, recent: [], isDuplicate: () => null, isDuplicateImage: () => false, fileBase: path.join(outDir, 'image'), log,
+      });
     const { image, ...details } = content;
     log.info(`Post details: ${JSON.stringify(details, null, 1)}`);
     const post = {
@@ -42,6 +49,7 @@ class DryRunStop extends Error {}
     try {
       await tiktok.publishPhotoPost(page, post, {
         log, recentSounds: [], onProgress: (s) => log.info(`TikTok: ${s}`),
+        scheduleAt: tiktokSchedule ? tiktok.tiktokScheduleTime(Date.now() + 2 * 3600e3) : null,
         beforePost: async (sound) => {
           log.info(`Sound: ${sound ? `${sound.title} | ${sound.evidence}` : 'none attached'}`);
           await page.screenshot({ path: path.join(outDir, 'ready-to-post.png'), fullPage: true });

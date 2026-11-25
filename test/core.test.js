@@ -112,3 +112,29 @@ test('similarity helper', () => {
   assert.ok(jaccard('morning coffee routine for creators', 'morning coffee routine for busy creators') > 0.6);
   assert.ok(jaccard('ocean waves at night', 'city skyline at noon') < 0.2);
 });
+
+test('TikTok-based scheduling: upload order, retry delay respected, promotion to published', () => {
+  const store = new Store(tmpDb());
+  const day = dayKey();
+  const now = Date.now();
+  const later = store.createPost(day, now + 5 * 3600e3);
+  const sooner = store.createPost(day, now + 2 * 3600e3);
+  const retrying = store.createPost(day, now + 30 * 60e3);
+  store.updatePost(retrying, { attempts: 1, error: 'temporary failure' });
+  assert.strictEqual(store.nextTikTokCandidate(now).id, sooner, 'upcoming posts are uploaded ahead of time, earliest first');
+  store.updatePost(sooner, { status: 'tiktok_scheduled', published_at: now + 2 * 3600e3, caption_key: 'a' });
+  assert.strictEqual(store.nextTikTokCandidate(now).id, later, 'a post waiting for its retry time is skipped');
+  assert.strictEqual(store.stats(day).pending, 3);
+  assert.strictEqual(store.promoteDueTikTokScheduled(now + 3 * 3600e3), 1);
+  assert.strictEqual(store.getPost(sooner).status, 'published');
+  store.updatePost(later, { caption_key: 'a' });
+  assert.throws(() => store.updatePost(later, { status: 'tiktok_scheduled' }), /UNIQUE/, 'same caption cannot be scheduled twice');
+  store.close();
+});
+
+test('TikTok schedule time: 5-minute steps and at least 20 minutes ahead', () => {
+  const { tiktokScheduleTime } = require('../src/main/automation/tiktok');
+  const now = new Date(2026, 10, 26, 10, 0).getTime();
+  assert.strictEqual(new Date(tiktokScheduleTime(new Date(2026, 10, 26, 15, 7).getTime(), now)).getMinutes(), 10);
+  assert.strictEqual(tiktokScheduleTime(now + 60e3, now), now + 20 * 60e3);
+});

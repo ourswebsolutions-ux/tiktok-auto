@@ -25,7 +25,7 @@ Get the latest version from **[Releases](https://github.com/ourswebsolutions-ux/
 
 ### Automatic updates
 
-Installed apps check GitHub for a new release on start-up and every 4 hours. A new version is downloaded in the
+Installed apps check GitHub for a new release on start-up and **every minute**. A new version is downloaded in the
 background and installed automatically **as soon as the automation is idle** (never in the middle of a post); the app
 restarts and continues where it left off. The current version and update status are shown at the top of the dashboard,
 and the tray menu has *Check for Updates*.
@@ -68,6 +68,19 @@ spreads the remaining posts over the remaining hours. Failed posts are retried
 Closing the window keeps the automation running in the background (tray icon: Open / Start / Stop / Check for Updates /
 Quit). The app starts hidden when you log in to your computer and resumes the remaining posts of the day.
 On GNOME, tray icons need the *AppIndicator* extension (`sudo apt install gnome-shell-extension-appindicator`).
+
+## Scheduling: Software-Based or TikTok-Based
+
+A switch on the dashboard selects how posts are scheduled. Content generation, posts per day and the calculated
+posting times are the same in both modes, and automation runs continuously until you press **Stop**.
+
+- **Software-Based** (default): the app publishes each post itself at its calculated time.
+- **TikTok-Based**: the app generates and uploads the upcoming posts one by one right away and sets each one's time in
+  TikTok's own *When to post → Schedule* option, so TikTok publishes them – even if the computer is off at that time.
+  TikTok needs a schedule time at least ~15 minutes ahead in 5-minute steps, so a time that is too close is moved to
+  20 minutes from now and times are rounded up to the next 5 minutes. The history shows these posts as
+  *Scheduled on TikTok*; they count as published once their time has passed. The first time, TikTok asks once to allow
+  saving posts for scheduled posting – the app confirms that dialog.
 
 ## How the music is chosen
 

@@ -43,9 +43,10 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 CREATE INDEX IF NOT EXISTS idx_posts_day ON posts(day);
 CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
--- Hard guarantee against publishing the same caption twice.
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_posted_caption ON posts(caption_key)
-  WHERE status IN ('posting', 'unverified', 'published');
+-- Hard guarantee against publishing (or scheduling on TikTok) the same caption twice.
+DROP INDEX IF EXISTS uniq_posted_caption;
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_posted_caption_v2 ON posts(caption_key)
+  WHERE status IN ('posting', 'unverified', 'published', 'tiktok_scheduled');
 CREATE TABLE IF NOT EXISTS cache (
   key TEXT PRIMARY KEY,
   value TEXT,
@@ -54,8 +55,9 @@ CREATE TABLE IF NOT EXISTS cache (
 `;
 
 // Statuses
-const ACTIVE_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified', 'published'];
-const PENDING_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified'];
+// 'tiktok_scheduled' = uploaded and scheduled with TikTok's own scheduler; published_at holds the TikTok post time.
+const ACTIVE_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified', 'published', 'tiktok_scheduled'];
+const PENDING_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified', 'tiktok_scheduled'];
 const IN_PROGRESS_STATUSES = ['generating', 'uploading', 'posting'];
 
 const POST_FIELDS = new Set([
@@ -182,6 +184,20 @@ class Store {
     return plain(this.db.prepare(
       'SELECT * FROM posts WHERE status = \'scheduled\' AND scheduled_at <= ? ORDER BY scheduled_at ASC LIMIT 1',
     ).get(now));
+  }
+
+  // TikTok-based scheduling: upload upcoming posts ahead of time, one by one. Posts waiting for a retry
+  // delay (error set, scheduled_at in the future) are skipped until their retry time.
+  nextTikTokCandidate(now) {
+    return plain(this.db.prepare(
+      'SELECT * FROM posts WHERE status = \'scheduled\' AND (scheduled_at <= ? OR (attempts = 0 AND error IS NULL)) ORDER BY scheduled_at ASC LIMIT 1',
+    ).get(now));
+  }
+
+  // Posts scheduled on TikTok whose time has passed are live on TikTok now.
+  promoteDueTikTokScheduled(now) {
+    return this.db.prepare('UPDATE posts SET status = \'published\', updated_at = ? WHERE status = \'tiktok_scheduled\' AND published_at <= ?')
+      .run(now, now).changes;
   }
 
   nextScheduledPost() {

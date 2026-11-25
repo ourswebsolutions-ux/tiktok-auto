@@ -278,13 +278,102 @@ async function ensurePostNow(page) {
   if (await visible(now)) await now.click().catch(() => {});
 }
 
-const SUCCESS_RE = /(your (post|video|photo)s? (has been|have been|is being|was|were) (posted|published|uploaded|shared))|(posted|published|uploaded) successfully|manage your posts|view (your )?post/i;
+// ---------- TikTok native scheduling ("When to post: Schedule") ----------
+// Verified 2026-11-26: radio input[value=schedule] in [data-e2e=schedule_container]; first use may show
+// "Allow your video to be saved for scheduled posting?" (Cancel / Allow); then .scheduled-picker with
+// [aria-label="Select date"] (DatePicker__panel, day buttons labelled "Thursday, November 26th, 2026")
+// and [aria-label="Select time"] (two TimePicker__column wheels: hours 00-23, minutes in 5-minute steps).
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const pad2 = (n) => String(n).padStart(2, '0');
+const ordinal = (d) => d + ((d % 100 >= 11 && d % 100 <= 13) ? 'th' : (['th', 'st', 'nd', 'rd'][d % 10] || 'th'));
+const SCHEDULE_STEP_MS = 5 * 60 * 1000;
+const MIN_SCHEDULE_LEAD_MS = 20 * 60 * 1000; // TikTok needs at least ~15 minutes; keep a safety margin
+
+// TikTok's time picker uses 5-minute steps: round up and keep the minimum lead time.
+function tiktokScheduleTime(slotMs, nowMs = Date.now()) {
+  const t = Math.max(slotMs, nowMs + MIN_SCHEDULE_LEAD_MS);
+  return Math.ceil(t / SCHEDULE_STEP_MS) * SCHEDULE_STEP_MS;
+}
+
+async function pickerValue(page, label) {
+  const loc = page.locator('.scheduled-picker [aria-label="' + label + '"] .Picker__value').first();
+  return (await loc.innerText().catch(() => '')).trim();
+}
+
+async function setSchedule(page, whenMs, log) {
+  const d = new Date(whenMs);
+  const container = page.locator('[data-e2e=schedule_container]');
+  const radio = container.locator('input[value=schedule]').first();
+  await radio.scrollIntoViewIfNeeded().catch(() => {});
+  await container.getByText('Schedule', { exact: true }).first().click();
+  await sleep(1500);
+  // One-time TikTok consent for scheduled posts.
+  const allow = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name: /^allow$/i });
+  if (await visible(allow)) { await allow.first().click(); await sleep(1500); }
+  if (!(await radio.isChecked())) await radio.check({ force: true });
+  await waitUntil(page, () => visible(page.locator('.scheduled-picker [aria-label="Select date"]')),
+    { timeout: 15000, label: 'TikTok schedule date/time pickers', site: SITE });
+
+  const tz = await page.locator('.scheduled-picker .timezone-select input').first().inputValue().catch(() => '');
+  if (tz && !/local time/i.test(tz)) log.warn('TikTok schedule timezone is "' + tz + '" (expected Local Time).');
+
+  // Date
+  const wantDate = MONTHS[d.getMonth()].slice(0, 3) + ' ' + d.getDate() + ', ' + d.getFullYear();
+  if ((await pickerValue(page, 'Select date')) !== wantDate) {
+    await page.locator('.scheduled-picker [aria-label="Select date"]').click();
+    const panel = page.locator('.DatePicker__panel').first();
+    await waitUntil(page, () => visible(panel), { timeout: 10000, label: 'TikTok date calendar', site: SITE });
+    const dayLabel = MONTHS[d.getMonth()] + ' ' + ordinal(d.getDate()) + ', ' + d.getFullYear();
+    const dayBtn = panel.locator('button[aria-label$="' + dayLabel + '"]').first();
+    for (let i = 0; i < 2 && !(await visible(dayBtn)); i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await panel.getByRole('button', { name: 'Next month' }).click().catch(() => {});
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(600);
+    }
+    if (!(await visible(dayBtn))) throw new UiError('TikTok calendar does not offer ' + dayLabel);
+    await dayBtn.click();
+    await sleep(800);
+    if (await visible(panel)) await page.keyboard.press('Escape').catch(() => {});
+  }
+  const gotDate = await pickerValue(page, 'Select date');
+  if (gotDate !== wantDate) throw new UiError('TikTok schedule date is "' + gotDate + '", expected "' + wantDate + '"');
+
+  // Time
+  const hh = pad2(d.getHours());
+  const mm = pad2(d.getMinutes());
+  const wantTime = hh + ':' + mm;
+  if ((await pickerValue(page, 'Select time')) !== wantTime) {
+    await page.locator('.scheduled-picker [aria-label="Select time"]').click();
+    const cols = page.locator('.TimePicker__column');
+    await waitUntil(page, async () => (await cols.count()) >= 2 && (await visible(cols.first())),
+      { timeout: 10000, label: 'TikTok time picker', site: SITE });
+    await cols.nth(0).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + hh + '$') }).first().click();
+    await sleep(500);
+    await cols.nth(1).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + mm + '$') }).first().click();
+    await sleep(800);
+    if (await visible(cols.first())) await page.keyboard.press('Escape').catch(() => {});
+    await sleep(500);
+  }
+  const gotTime = await pickerValue(page, 'Select time');
+  if (gotTime !== wantTime) throw new UiError('TikTok schedule time is "' + gotTime + '", expected "' + wantTime + '" (TikTok may not allow this time)');
+  if (!(await radio.isChecked())) throw new UiError('TikTok "Schedule" option did not stay selected');
+  return wantDate + ' ' + wantTime;
+}
+
+async function scheduleStillMatches(page, scheduledFor) {
+  if (!scheduledFor) return true;
+  return (await pickerValue(page, 'Select date')) + ' ' + (await pickerValue(page, 'Select time')) === scheduledFor;
+}
+
+const SUCCESS_RE = /(your (post|video|photo)s? (has been|have been|is being|was|were) (posted|published|uploaded|shared|scheduled))|(posted|published|uploaded|scheduled) successfully|manage your posts|view (your )?post/i;
 const FAIL_RE = /(couldn['’]t|could not|failed to|unable to) (post|publish|upload)|something went wrong|(posting|uploading) too (fast|frequently|often)|reached (the|your) (daily )?(post|upload)ing? limit|try again later/i;
 
-async function clickPostAndConfirm(page, shouldAbort) {
-  const postBtn = page.getByRole('button', { name: 'Post', exact: true }).first();
+async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
+  // With "Schedule" selected TikTok renames the Post button to "Schedule" (the radio label is not a button).
+  const postBtn = page.getByRole('button', { name: buttonName, exact: true }).last();
   await waitUntil(page, async () => (await visible(postBtn)) && (await postBtn.isEnabled()) && (await postBtn.getAttribute('aria-disabled')) !== 'true',
-    { timeout: 60000, label: 'enabled Post button', site: SITE, shouldAbort });
+    { timeout: 60000, label: 'enabled ' + buttonName + ' button', site: SITE, shouldAbort });
   const startUrl = page.url();
   await postBtn.click();
   const res = await waitUntil(page, async () => {
@@ -319,9 +408,10 @@ async function findInPostsList(page, { title, caption }) {
 /**
  * Full publish flow for one photo post.
  * hooks.beforePost() is called right before clicking Post (used to persist the "posting" state).
- * Returns { published: boolean, unverified?: boolean, signal, sound }.
+ * scheduleAt (ms): when set, the post is scheduled with TikTok's own "Schedule" option instead of posted now.
+ * Returns { published: boolean, unverified?: boolean, signal, sound, scheduledFor? }.
  */
-async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, beforePost, onProgress }) {
+async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, beforePost, onProgress, scheduleAt = null }) {
   onProgress('Opening TikTok Studio');
   await openUploader(page, shouldAbort);
   onProgress('Uploading image to TikTok');
@@ -344,7 +434,13 @@ async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, be
   await setTitle(page, post.title || '');
   await setDescription(page, post.caption, hashtags);
   await enableAiLabel(page, log);
-  await ensurePostNow(page);
+  let scheduledFor = null;
+  if (scheduleAt) {
+    onProgress('Setting TikTok schedule for ' + new Date(scheduleAt).toLocaleString());
+    scheduledFor = await setSchedule(page, scheduleAt, log);
+  } else {
+    await ensurePostNow(page);
+  }
 
   onProgress('Verifying post details');
   // Final verification of everything before publishing.
@@ -356,9 +452,11 @@ async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, be
     sound = null;
   }
 
+  if (!(await scheduleStillMatches(page, scheduledFor))) throw new UiError('TikTok schedule date/time changed before scheduling');
+
   await beforePost(sound);
-  onProgress('Publishing');
-  const res = await clickPostAndConfirm(page, shouldAbort);
+  onProgress(scheduleAt ? 'Scheduling on TikTok' : 'Publishing');
+  const res = await clickPostAndConfirm(page, shouldAbort, scheduleAt ? 'Schedule' : 'Post');
   if (!res.ok && !res.timeout) return { published: false, failedAfterClick: true, message: `TikTok reported: ${res.message}`, sound };
 
   onProgress('Confirming publication on TikTok');
@@ -369,8 +467,9 @@ async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, be
     // eslint-disable-next-line no-await-in-loop
     if (!listed) await sleep(20000);
   }
-  if (listed) return { published: true, signal: `${res.signal || 'posted'}; found in TikTok Posts list`, sound };
-  return { published: false, unverified: true, message: res.ok ? `TikTok showed "${res.signal}" but the post is not in the Posts list yet` : 'No confirmation from TikTok after clicking Post', sound };
+  const when = scheduledFor ? ` (scheduled on TikTok for ${scheduledFor})` : '';
+  if (listed) return { published: true, signal: `${res.signal || 'posted'}; found in TikTok Posts list${when}`, sound, scheduledFor };
+  return { published: false, unverified: true, message: res.ok ? `TikTok showed "${res.signal}" but the post is not in the Posts list yet${when}` : `No confirmation from TikTok after clicking ${scheduleAt ? 'Schedule' : 'Post'}`, sound, scheduledFor };
 }
 
-module.exports = { checkTikTok, publishPhotoPost, findInPostsList, rankSounds, collectMusic, MIN_SOUND_USES };
+module.exports = { checkTikTok, publishPhotoPost, findInPostsList, rankSounds, collectMusic, tiktokScheduleTime, MIN_SOUND_USES };
