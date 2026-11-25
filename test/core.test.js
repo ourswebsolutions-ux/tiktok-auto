@@ -46,7 +46,7 @@ test('planDay: full day, late start, reduce quantity, replacement cap', () => {
 });
 
 test('ChatGPT JSON extraction and normalisation', () => {
-  const reply = 'json\nCopy code\n{"idea":"Sunrise over a misty lake","title":"Start fresh #new","caption":"Every sunrise is a new chance ☀️ #sunrise","hashtags":["sunrise","#Motivation","#fyp","#fyp"],"image_prompt":"A misty lake at sunrise, golden light, vertical composition, cinematic","music_keywords":["calm piano","uplifting"],"topic_keywords":["sunrise"]}';
+  const reply = 'json\nCopy code\n{"idea":"Sunrise over a misty lake","title":"Start fresh #new","caption":"Every sunrise is a new chance ☀️ #sunrise","hashtags":["sunrise","#Motivation","#fyp","#fyp"],"music_keywords":["calm piano","uplifting"],"topic_keywords":["sunrise"]}';
   const c = normalizeContent(extractJson(reply));
   assert.strictEqual(c.title, 'Start fresh');
   assert.strictEqual(c.caption, 'Every sunrise is a new chance ☀️');

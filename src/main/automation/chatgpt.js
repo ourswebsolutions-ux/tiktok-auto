@@ -159,60 +159,27 @@ function normalizeContent(j) {
     title: stripTags(str(j.title, 200)).slice(0, 85),
     caption: stripTags(str(j.caption, 1500)),
     hashtags,
-    image_prompt: str(j.image_prompt, 3000),
     music_keywords: asList(j.music_keywords).map((k) => k.slice(0, 40)).slice(0, 4),
     topic_keywords: asList(j.topic_keywords).map((k) => k.slice(0, 40)).slice(0, 6),
   };
-  if (!c.idea || !c.caption || c.image_prompt.length < 30 || c.hashtags.length < 3 || !c.music_keywords.length) {
-    throw new UiError('ChatGPT returned incomplete content (missing idea/caption/image prompt/hashtags/music keywords)');
+  if (!c.idea || !c.caption || c.hashtags.length < 3 || !c.music_keywords.length) {
+    throw new UiError('ChatGPT returned incomplete post details (missing description/caption/hashtags/music keywords)');
   }
   if (!c.title) c.title = c.caption.slice(0, 80);
   return c;
 }
 
-function buildContentPrompt(userPrompt, recent) {
-  const avoid = recent.slice(0, 20).map((r) => `- ${r.idea || ''} | "${(r.caption || '').slice(0, 80)}" | ${r.hashtags || ''}`).join('\n');
+// Asked AFTER the image exists, in the same chat, so caption and hashtags match the actual image.
+function buildDetailsPrompt(recent) {
+  const avoid = recent.slice(0, 15).map((r) => `- "${(r.caption || '').slice(0, 90)}" | ${r.hashtags || ''}`).join('\n');
   return [
-    'You are a TikTok content strategist. Create ONE new TikTok photo post (a single AI-generated image with a caption) based on the creator instructions below.',
+    'Now write the TikTok photo post details for the image you just created.',
+    'If my instructions above say anything about the caption, hashtags, language or style, follow them exactly.',
+    avoid ? `Do not repeat these earlier captions or hashtag sets:\n${avoid}` : '',
     '',
-    'CREATOR INSTRUCTIONS:',
-    userPrompt.trim(),
-    '',
-    avoid ? `Previously used ideas (yours must be clearly DIFFERENT in topic angle, wording, visual concept and hashtag set):\n${avoid}` : 'This is the first post.',
-    '',
-    'Requirements:',
-    '- A fresh, specific, engaging idea that fits the instructions.',
-    '- "image_prompt": a detailed image-generation prompt (subject, setting, style, lighting, colors, composition), vertical 9:16 portrait format, no text, letters, watermarks or logos in the image.',
-    '- "title": a catchy hook of at most 80 characters, no hashtags.',
-    '- "caption": an engaging TikTok description of 1-3 short sentences (max 300 characters), may include emojis, NO hashtags.',
-    '- "hashtags": 5 to 8 relevant hashtags that are currently popular on TikTok for this topic, mixing broad and niche tags.',
-    '- "music_keywords": 3 short search phrases (1-3 words each) describing the mood/genre/theme of background music that fits this post, for searching TikTok\'s sound library (e.g. "calm piano", "epic motivation").',
-    '- "topic_keywords": 3-5 keywords describing the topic.',
-    '',
-    'Reply with ONLY one JSON object inside a ```json code block, with exactly these keys:',
-    '{"idea": "", "title": "", "caption": "", "hashtags": [], "image_prompt": "", "music_keywords": [], "topic_keywords": []}',
-  ].join('\n');
-}
-
-// Generates text content. `isDuplicate(content)` returns a reason string when the result repeats earlier posts.
-async function generateContent(page, { userPrompt, recent, isDuplicate, log, shouldAbort }) {
-  await openChat(page, { shouldAbort });
-  let reply = await ask(page, buildContentPrompt(userPrompt, recent), { shouldAbort });
-  for (let i = 0; i < 4; i++) {
-    let content = null;
-    let problem = null;
-    try {
-      content = normalizeContent(extractJson(reply.text));
-      problem = isDuplicate(content);
-    } catch (e) {
-      problem = e.message;
-    }
-    if (!problem) return content;
-    log.warn(`ChatGPT content rejected (${problem}); asking for a different one.`);
-    // eslint-disable-next-line no-await-in-loop
-    reply = await ask(page, `That does not work: ${problem}. Create a completely different idea with a different angle, caption and hashtags. Reply with ONLY the JSON object in a \`\`\`json code block, same keys as before.`, { shouldAbort });
-  }
-  throw new UiError('ChatGPT kept returning invalid or repeated content');
+    'Reply with ONLY one JSON object inside a ```json code block with exactly these keys:',
+    '{"idea": "one sentence describing exactly what the image shows (including any text on it)", "title": "catchy hook, max 80 characters, no hashtags", "caption": "engaging TikTok description, 1-3 short sentences, max 300 characters, no hashtags", "hashtags": ["5 to 8 relevant hashtags popular on TikTok for this topic"], "music_keywords": ["3 short search phrases for the mood/genre of fitting background music, e.g. calm piano"], "topic_keywords": ["3-5 topic keywords"]}',
+  ].filter((l) => l !== '').join('\n');
 }
 
 function imageType(buf) {
@@ -247,35 +214,29 @@ function imageSize(buf) {
   return null;
 }
 
+
 const GENERATED_IMAGE_URL = /\/backend-api\/estuary\/content\?id=file_|files\.oaiusercontent\.com\//;
 
-// Asks ChatGPT (same chat) to generate the image and saves it. Returns { file, buffer, width, height }.
-// The image is taken from the response the ChatGPT page itself loads to display the picture.
-async function generateImage(page, { imagePrompt, fileBase, shouldAbort, retryNote }) {
-  const msg = [
-    retryNote || 'Now generate the image for this post using ChatGPT image generation.',
-    'Vertical 9:16 portrait aspect ratio. No text, letters, watermarks or logos in the image.',
-    '',
-    `Image prompt: ${imagePrompt}`,
-  ].join('\n');
+// Sends `message` exactly as given and waits for a generated image. Returns { image, text }, image = null if none.
+// The image bytes come from the response the ChatGPT page itself loads to display the picture.
+async function sendAndCaptureImage(page, message, { shouldAbort } = {}) {
   const captured = [];
   const onResponse = async (r) => {
     if (!GENERATED_IMAGE_URL.test(r.url()) || !/^image\//.test(r.headers()['content-type'] || '')) return;
     try {
       const body = await r.body();
       const size = imageSize(body);
-      if (size && size.w >= 512 && size.h >= 512) captured.push({ url: r.url(), body, size });
+      if (size && size.w >= 512 && size.h >= 512) captured.push({ body, size });
     } catch (_) { /* response body unavailable */ }
   };
   page.on('response', onResponse);
   let result;
   try {
-    result = await ask(page, msg, { expectImage: true, imageReady: () => captured.length > 0, timeout: 12 * 60 * 1000, shouldAbort });
+    result = await ask(page, message, { expectImage: true, imageReady: () => captured.length > 0, timeout: 12 * 60 * 1000, shouldAbort });
   } finally {
     page.off('response', onResponse);
   }
-  let best = captured[captured.length - 1] || null; // final image is loaded last (after any previews)
-
+  let best = captured[captured.length - 1] || null; // the final image loads last (after any previews)
   if (!best && result.imageLabel) {
     // Fallback: the image URL is in the page; fetch it from within the page itself.
     const data = await page.evaluate(async () => {
@@ -295,14 +256,79 @@ async function generateImage(page, { imagePrompt, fileBase, shouldAbort, retryNo
       if (size && size.w >= 512) best = { body, size };
     }
   }
-  if (!best) {
-    const t = result.text.replace(/\s+/g, ' ').slice(0, 200);
-    if (REFUSAL_RE.test(result.text)) throw new UiError(`ChatGPT refused to create the image: ${t}`);
-    throw new UiError(`ChatGPT did not produce a downloadable image: ${t}`);
-  }
+  return { image: best, text: result.text };
+}
+
+function saveImage(best, fileBase) {
   const file = `${fileBase}.${imageType(best.body)}`;
   fs.writeFileSync(file, best.body);
   return { file, buffer: best.body, width: best.size.w, height: best.size.h };
 }
 
-module.exports = { checkChatGPT, openChat, generateContent, generateImage, extractJson, normalizeContent, buildContentPrompt, imageType, imageSize };
+/**
+ * Creates one post:
+ *  1. sends the creator's prompt to ChatGPT EXACTLY as written (nothing added or changed) and captures the image,
+ *  2. in the same chat asks for title, caption, hashtags and music keywords that match that image.
+ * `isDuplicate(details)` returns a reason when the post repeats earlier ones; `isDuplicateImage(buffer)` for images.
+ */
+async function generatePost(page, { userPrompt, recent, isDuplicate, isDuplicateImage, fileBase, log, shouldAbort }) {
+  await openChat(page, { shouldAbort });
+  let img = null;
+  for (let attempt = 0; attempt < 3 && !img; attempt++) {
+    const message = attempt === 0
+      ? userPrompt // verbatim
+      : 'Please create the image now, following my instructions above exactly.';
+    log.info(attempt === 0 ? 'Sending your prompt to ChatGPT exactly as written' : 'No image yet - asking ChatGPT to create the image');
+    // eslint-disable-next-line no-await-in-loop
+    const r = await sendAndCaptureImage(page, message, { shouldAbort });
+    if (r.image) {
+      if (isDuplicateImage && isDuplicateImage(r.image.body)) {
+        log.warn('Image is identical to an earlier post; asking for a new one.');
+        // eslint-disable-next-line no-await-in-loop
+        const again = await sendAndCaptureImage(page, 'This exact image was already posted. Create a new, different image following my instructions above exactly.', { shouldAbort });
+        if (again.image && !isDuplicateImage(again.image.body)) img = again.image;
+        else throw new UiError('ChatGPT returned an image that was already posted');
+      } else {
+        img = r.image;
+      }
+    } else if (REFUSAL_RE.test(r.text)) {
+      throw new UiError(`ChatGPT refused to create the image: ${r.text.replace(/\s+/g, ' ').slice(0, 200)}`);
+    }
+  }
+  if (!img) throw new UiError('ChatGPT did not create an image for this prompt');
+  let saved = saveImage(img, fileBase);
+  log.info(`Image saved: ${saved.file} (${saved.width}x${saved.height})`);
+
+  let reply = await ask(page, buildDetailsPrompt(recent), { shouldAbort });
+  let newImageAsked = false;
+  for (let i = 0; i < 4; i++) {
+    let details = null;
+    let problem = null;
+    try {
+      details = normalizeContent(extractJson(reply.text));
+      problem = isDuplicate(details);
+    } catch (e) {
+      problem = e.message;
+    }
+    // A new image was already made for this post: a similar description is expected for a fixed-theme prompt.
+    if (!problem || (newImageAsked && /idea is too similar/.test(problem))) return { ...details, image: saved, prompt_sent: userPrompt };
+    log.warn(`Post details rejected (${problem}).`);
+    if (/idea is too similar/.test(problem) && !newImageAsked) {
+      // Same concept as an earlier post: get a different image (same instructions), then new details.
+      newImageAsked = true;
+      // eslint-disable-next-line no-await-in-loop
+      const again = await sendAndCaptureImage(page, 'This is too similar to something I already posted. Create a new, clearly different image following my original instructions above exactly.', { shouldAbort });
+      if (!again.image) throw new UiError('ChatGPT did not create a replacement image');
+      fs.rmSync(saved.file, { force: true });
+      saved = saveImage(again.image, fileBase);
+      // eslint-disable-next-line no-await-in-loop
+      reply = await ask(page, buildDetailsPrompt(recent), { shouldAbort });
+      continue;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    reply = await ask(page, `That does not work: ${problem}. Write different details for the same image. Reply with ONLY the JSON object in a \`\`\`json code block, same keys as before.`, { shouldAbort });
+  }
+  throw new UiError('ChatGPT kept returning invalid or repeated post details');
+}
+
+module.exports = { checkChatGPT, openChat, generatePost, extractJson, normalizeContent, buildDetailsPrompt, imageType, imageSize };

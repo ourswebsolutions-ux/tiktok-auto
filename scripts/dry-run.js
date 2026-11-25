@@ -1,10 +1,9 @@
 'use strict';
 // Runs the complete pipeline in your everyday Chrome but STOPS right before clicking "Post":
-// ChatGPT content -> ChatGPT image -> TikTok upload -> sound -> caption/hashtags -> AI label -> verification.
+// your prompt (sent to ChatGPT exactly as written) -> image -> caption/hashtags -> TikTok upload -> sound -> AI label -> verification.
 // The TikTok tab is then closed, which discards the draft. Nothing is published.
 //
-//   npm run dry-run -- "your prompt"                 (full run, uses one ChatGPT image generation)
-//   npm run dry-run -- --image path/to/image.png     (skip image generation, use an existing image)
+//   npm run dry-run -- "your prompt"     (uses one ChatGPT image generation)
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -16,10 +15,8 @@ class DryRunStop extends Error {}
 
 (async () => {
   const args = process.argv.slice(2);
-  const imgIdx = args.indexOf('--image');
-  const existingImage = imgIdx >= 0 ? path.resolve(args[imgIdx + 1]) : null;
-  const userPrompt = args.filter((a, i) => imgIdx < 0 || (i !== imgIdx && i !== imgIdx + 1)).join(' ')
-    || 'Short motivational posts for young entrepreneurs, cinematic and moody visuals';
+  const userPrompt = args.join(' ')
+    || 'Create a vertical 9:16 motivational image with the text "Start before you are ready" in bold white letters on a cinematic sunrise background.';
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tiktok-dry-run-'));
   const t0 = Date.now();
   const log = {
@@ -33,17 +30,13 @@ class DryRunStop extends Error {}
   try {
     page = await chrome.newPage();
     log.info(`Prompt: ${userPrompt}`);
-    const content = await chatgpt.generateContent(page, { userPrompt, recent: [], isDuplicate: () => null, log });
-    log.info(`ChatGPT content: ${JSON.stringify(content, null, 1)}`);
-    let imagePath = existingImage;
-    if (!imagePath) {
-      log.info('Generating image in ChatGPT (can take 1-3 minutes)...');
-      const img = await chatgpt.generateImage(page, { imagePrompt: content.image_prompt, fileBase: path.join(outDir, 'image') });
-      imagePath = img.file;
-      log.info(`Image saved: ${img.file} (${img.width}x${img.height}, ${img.buffer.length} bytes)`);
-    }
+    const content = await chatgpt.generatePost(page, {
+      userPrompt, recent: [], isDuplicate: () => null, isDuplicateImage: () => false, fileBase: path.join(outDir, 'image'), log,
+    });
+    const { image, ...details } = content;
+    log.info(`Post details: ${JSON.stringify(details, null, 1)}`);
     const post = {
-      image_path: imagePath, title: content.title, caption: content.caption, hashtags: JSON.stringify(content.hashtags),
+      image_path: image.file, title: content.title, caption: content.caption, hashtags: JSON.stringify(content.hashtags),
       music_keywords: JSON.stringify(content.music_keywords), topic_keywords: JSON.stringify(content.topic_keywords),
     };
     try {

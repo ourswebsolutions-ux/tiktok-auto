@@ -3,9 +3,10 @@
 Add prompts → set posts per day → **Start Automation**. For every scheduled post the app works inside **your own
 everyday Chrome** (your existing logins):
 
-1. opens **ChatGPT** and generates a fresh idea, title, caption, hashtags and a detailed image prompt (checked against
-   earlier posts so nothing repeats),
-2. generates the **image** with ChatGPT's image generation and saves it locally,
+1. opens **ChatGPT** and sends **your prompt exactly as you wrote it** – nothing is added or changed, so if your prompt
+   asks for text on the image, a style, a language etc., ChatGPT gets exactly that – and saves the generated **image**,
+2. in the same chat asks ChatGPT for a title, caption, hashtags and music keywords **for that image** (following your
+   prompt if it says anything about captions/hashtags; checked against earlier posts so nothing repeats),
 3. opens **TikTok Studio** and uploads the image as a photo post,
 4. picks a **relevant, popular sound** (see below) and attaches it,
 5. enters title, caption and hashtags, switches on TikTok's *AI-generated content* label and verifies everything,
@@ -38,8 +39,10 @@ itself. Your other tabs, profile data and cookies are never touched, read or exp
 Use either option:
 
 - **Recommended:** in Chrome open `chrome://inspect/#remote-debugging` and turn on **Allow remote debugging**. When the
-  app connects, Chrome asks *"Allow remote debugging?"* – click **Allow**. The app keeps that single connection open,
-  so you are asked once per app start, not for every post.
+  app connects, Chrome asks *"Allow remote debugging?"* – click **Allow**. This prompt is Chrome's own security
+  protection for your everyday profile and cannot be turned off by any app. The app opens **one** connection and keeps
+  it, so you are asked only when the app (re)starts – e.g. after booting or an update – or after Chrome was restarted,
+  never for each post.
 - or start Chrome with the flag `--remote-debugging-port=9222` (note: recent Chrome versions ignore this flag for the
   default profile, so the option above is usually needed).
 
@@ -51,7 +54,9 @@ in the dashboard to verify. If Chrome isn't reachable, the app shows these instr
 
 ## Using it
 
-1. Add one or more prompts (used in rotation), e.g. *"Motivational quotes for young entrepreneurs, cinematic moody visuals"*.
+1. Add one or more prompts (used in rotation). Write them exactly as you would type them into ChatGPT, e.g.
+   *"Create a vertical 9:16 image with a short motivational quote in bold white text on a cinematic background."*
+   Each post sends the prompt again in a new chat, so ChatGPT creates a new image every time.
 2. Set **Posts per day** (1–20).
 3. Press **Start Automation**.
 

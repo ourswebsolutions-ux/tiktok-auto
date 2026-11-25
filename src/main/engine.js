@@ -219,7 +219,6 @@ class Engine extends EventEmitter {
       if (r.id === postId) continue;
       if (r.idea && jaccard(c.idea, r.idea) >= 0.6) return `the idea is too similar to an earlier post ("${r.idea.slice(0, 70)}")`;
       if (r.caption && jaccard(`${c.title} ${c.caption}`, `${r.title || ''} ${r.caption}`) >= 0.55) return 'the caption is too similar to an earlier post';
-      if (r.image_prompt && jaccard(c.image_prompt, r.image_prompt) >= 0.7) return 'the image concept is too similar to an earlier post';
       if (r.hashtags) {
         try { if ([...JSON.parse(r.hashtags)].sort().join(' ') === tagKey) return 'exactly the same hashtag set was used before'; } catch (_) { /* ignore */ }
       }
@@ -243,42 +242,31 @@ class Engine extends EventEmitter {
       page = await this.chrome.newPage();
       let p = this.store.getPost(id);
 
-      // 1) Content + image from ChatGPT (skipped if already generated before an interruption).
+      // 1) Image + post details from ChatGPT. Your prompt is sent exactly as written; the caption/hashtags
+      //    are then written for the image ChatGPT actually created. Skipped if already done before an interruption.
       if (!p.caption || !p.image_path || !fs.existsSync(p.image_path)) {
         const prompt = (p.prompt_id && this.store.getPrompt(p.prompt_id)) || this.store.nextPrompt();
         if (!prompt) throw new UiError('No prompts configured');
         this.store.touchPrompt(prompt.id);
-        this.store.updatePost(id, { prompt_id: prompt.id, prompt_text: prompt.text });
+        this.store.updatePost(id, { prompt_id: prompt.id, prompt_text: prompt.text, caption: null, image_path: null });
         const recent = this.store.recentContent(40);
-
-        if (!p.caption) {
-          step('Generating idea, caption and hashtags in ChatGPT');
-          const c = await chatgpt.generateContent(page, {
-            userPrompt: prompt.text, recent, isDuplicate: (x) => this.duplicateReason(x, recent, id), log, shouldAbort: () => this.shouldAbort(),
-          });
-          this.store.updatePost(id, {
-            idea: c.idea, title: c.title, caption: c.caption, hashtags: JSON.stringify(c.hashtags), image_prompt: c.image_prompt,
-            music_keywords: JSON.stringify(c.music_keywords), topic_keywords: JSON.stringify(c.topic_keywords), caption_key: captionKey(c.title, c.caption),
-          });
-          log.info(`Idea: ${c.idea}`);
-        } else {
-          await chatgpt.openChat(page, { shouldAbort: () => this.shouldAbort() });
-        }
-        this.checkAbort();
-        p = this.store.getPost(id);
-        step('Generating image in ChatGPT');
+        step('Creating image in ChatGPT from your prompt');
         fs.mkdirSync(this.dirs.media, { recursive: true });
-        let img = await chatgpt.generateImage(page, { imagePrompt: p.image_prompt, fileBase: path.join(this.dirs.media, `post-${id}-${Date.now()}`), shouldAbort: () => this.shouldAbort() });
-        let hash = sha256(img.buffer);
-        if (this.store.imageHashUsed(hash, id)) {
-          log.warn('Generated image is identical to an earlier one, asking for a different image.');
-          fs.rmSync(img.file, { force: true });
-          img = await chatgpt.generateImage(page, { imagePrompt: p.image_prompt, fileBase: path.join(this.dirs.media, `post-${id}-${Date.now()}`), shouldAbort: () => this.shouldAbort(), retryNote: 'Generate a completely different new image (different composition) for this post.' });
-          hash = sha256(img.buffer);
-          if (this.store.imageHashUsed(hash, id)) throw new UiError('ChatGPT returned a duplicate image twice');
-        }
-        this.store.updatePost(id, { image_path: img.file, image_hash: hash });
-        log.info(`Image saved: ${img.file} (${img.width}x${img.height})`);
+        const c = await chatgpt.generatePost(page, {
+          userPrompt: prompt.text,
+          recent,
+          isDuplicate: (x) => this.duplicateReason(x, recent, id),
+          isDuplicateImage: (buf) => this.store.imageHashUsed(sha256(buf), id),
+          fileBase: path.join(this.dirs.media, `post-${id}-${Date.now()}`),
+          log,
+          shouldAbort: () => this.shouldAbort(),
+        });
+        this.store.updatePost(id, {
+          idea: c.idea, title: c.title, caption: c.caption, hashtags: JSON.stringify(c.hashtags), image_prompt: c.prompt_sent,
+          music_keywords: JSON.stringify(c.music_keywords), topic_keywords: JSON.stringify(c.topic_keywords), caption_key: captionKey(c.title, c.caption),
+          image_path: c.image.file, image_hash: sha256(c.image.buffer),
+        });
+        log.info(`Post: ${c.idea}`);
       }
       this.checkAbort();
 
