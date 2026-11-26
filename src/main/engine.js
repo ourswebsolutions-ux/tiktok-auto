@@ -23,8 +23,8 @@ const {
 
 const TICK_MS = 15000;
 const MAX_ATTEMPTS = 6;
-// Quick, growing retry delays (minutes) after a failed attempt; other posts keep going meanwhile.
-const RETRY_DELAYS_MIN = [1, 2, 5, 10, 15];
+// Wait before retrying a failed attempt (minutes).
+const RETRY_DELAY_MIN = 2;
 // TikTok-based mode keeps this many days scheduled ahead (TikTok allows scheduling up to 10 days ahead).
 const TIKTOK_DAYS_AHEAD = 10;
 const TIKTOK_UPLOAD_PAUSE_MS = 60 * 1000; // TikTok-based mode: short pause between uploads
@@ -468,7 +468,7 @@ class Engine extends EventEmitter {
       // A generated image is kept and only the upload is repeated; only when generation itself keeps failing
       // (no image yet) is the content generated fresh every MAX_ATTEMPTS failures.
       const fresh = post.attempts > 0 && post.attempts % MAX_ATTEMPTS === 0 && !(post.image_path && fs.existsSync(post.image_path));
-      const delayMin = RETRY_DELAYS_MIN[Math.min(post.attempts, RETRY_DELAYS_MIN.length) - 1] || RETRY_DELAYS_MIN[RETRY_DELAYS_MIN.length - 1];
+      const delayMin = RETRY_DELAY_MIN;
       this.store.updatePost(id, {
         status: 'scheduled', scheduled_at: now + delayMin * 60 * 1000, error: msg,
         ...(fresh ? { caption: null, image_path: null, caption_key: null, image_hash: null } : {}),

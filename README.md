@@ -96,8 +96,9 @@ posting times are the same in both modes, and automation runs continuously until
 - If ChatGPT shows an error ("Something went wrong", "Try again", no image), the app immediately asks it to
   regenerate the image – up to 6 times – instead of waiting. Only a real usage-limit message pauses image creation
   (re-checked every 30 minutes).
-- A failed post or upload is retried automatically after 1, 2, 5, 10 and 15 minutes (up to 6 attempts); other posts
-  keep going meanwhile. If a post still fails, a replacement post is scheduled for that day.
+- A failed post or upload is retried automatically every 2 minutes.
+- Slow internet: pages are opened with automatic retries on network errors, and every step waits for the real result
+  (page loaded, photo uploaded – up to 10 minutes, sound results, image – up to 20 minutes) instead of fixed times.
 
 ## Every generated post reaches TikTok
 
@@ -109,7 +110,7 @@ restart the app continues from the last completed step; a generated image is nev
   that is still ahead, otherwise published immediately.
 - TikTok-Based mode: a confirmed post shows as "Scheduled on TikTok" and counts as published once its time has passed.
   Uploads are strictly one at a time – the next post waits until the current one is scheduled on TikTok.
-- Upload/scheduling failures are retried (1, 2, 5, 10, 15, 15 … minutes) until the post is on TikTok. Only a genuine
+- Upload/scheduling failures are retried every 2 minutes until the post is on TikTok. Only a genuine
   permanent error stops a post (the AI refuses the prompt). Posts of a past day that already have their image are
   published today instead of being dropped.
 - The posting schedule shows the latest 5 waiting / in-progress posts with image previews; *Show all* expands the

@@ -8,7 +8,7 @@
 // Older/alternative markup is kept as a fallback.
 
 const fs = require('fs');
-const { NeedsHumanError, RateLimitError, UiError, sleep, waitUntil, visible, safeClick, detectChallenge } = require('./util');
+const { NeedsHumanError, RateLimitError, UiError, sleep, waitUntil, visible, safeClick, gotoSafe, detectChallenge } = require('./util');
 
 // A regular chat is required: ChatGPT does not allow image generation in temporary chats.
 const CHAT_URL = 'https://chatgpt.com/';
@@ -58,8 +58,8 @@ async function dismissOverlays(page) {
 
 // Opens a NEW, empty chat (every post gets its own chat).
 async function openChat(page, opts = {}) {
-  await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
-  await waitUntil(page, () => visible(page.locator(COMPOSER).filter({ visible: true })), { timeout: 60000, label: 'ChatGPT message box', site: 'ChatGPT', shouldAbort: opts.shouldAbort });
+  await gotoSafe(page, CHAT_URL);
+  await waitUntil(page, () => visible(page.locator(COMPOSER).filter({ visible: true })), { timeout: 180000, label: 'ChatGPT message box', site: 'ChatGPT', shouldAbort: opts.shouldAbort });
   await sleep(1500);
   await ensureLoggedIn(page);
   await dismissOverlays(page);
@@ -67,15 +67,15 @@ async function openChat(page, opts = {}) {
     // An old conversation is showing: start a new chat explicitly.
     const newChat = page.getByRole('link', { name: /^new chat$/i }).or(page.getByRole('button', { name: /^new chat$/i })).first();
     await safeClick(page, newChat, 'ChatGPT "New chat"', dismissOverlays);
-    await waitUntil(page, async () => (await lastTurn(page)).count === 0, { timeout: 20000, label: 'a new empty ChatGPT chat', site: 'ChatGPT' });
+    await waitUntil(page, async () => (await lastTurn(page)).count === 0, { timeout: 60000, label: 'a new empty ChatGPT chat', site: 'ChatGPT' });
   }
 }
 
 // Read-only check used by "Check Chrome" and the startup check. Sends nothing.
 async function checkChatGPT(page) {
-  await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 90000 });
+  await gotoSafe(page, 'https://chatgpt.com/');
   try {
-    await waitUntil(page, () => visible(page.locator(COMPOSER).filter({ visible: true })), { timeout: 45000, label: 'ChatGPT message box', site: 'ChatGPT' });
+    await waitUntil(page, () => visible(page.locator(COMPOSER).filter({ visible: true })), { timeout: 120000, label: 'ChatGPT message box', site: 'ChatGPT' });
   } catch (e) {
     const ch = await detectChallenge(page);
     return { ok: false, detail: ch ? `${ch} - solve it in Chrome` : `page did not load normally (${e.message})` };
@@ -146,7 +146,7 @@ async function clickRetry(page) {
 }
 
 // Sends a message (or, with text = null, presses ChatGPT's Retry button) and waits for the complete answer.
-async function ask(page, text, { timeout = 180000, expectImage = false, imageReady = () => false, shouldAbort } = {}) {
+async function ask(page, text, { timeout = 600000, expectImage = false, imageReady = () => false, shouldAbort } = {}) {
   const before = await lastTurn(page);
   if (text === null && (await clickRetry(page))) {
     before.count = -1; // the answer is replaced in place, the turn count does not grow
@@ -154,12 +154,12 @@ async function ask(page, text, { timeout = 180000, expectImage = false, imageRea
     await waitUntil(page, async () => {
       const t = await lastTurn(page);
       return t.state === 'in_progress' || !t.retryButton || (await visible(page.locator(STOP)));
-    }, { timeout: 20000, label: 'ChatGPT to restart the answer', site: 'ChatGPT', shouldAbort }).catch(() => {});
+    }, { timeout: 60000, label: 'ChatGPT to restart the answer', site: 'ChatGPT', shouldAbort }).catch(() => {});
   } else {
     await typeIntoComposer(page, text === null ? 'Please regenerate the image now, following my instructions above exactly.' : text);
     const send = page.locator(SEND).filter({ visible: true }).first();
     if (await visible(send)) {
-      await waitUntil(page, () => send.isEnabled(), { timeout: 10000, label: 'ChatGPT send button', site: 'ChatGPT' });
+      await waitUntil(page, () => send.isEnabled(), { timeout: 30000, label: 'ChatGPT send button', site: 'ChatGPT' });
       await safeClick(page, send, 'the ChatGPT send button', dismissOverlays);
     } else {
       await page.keyboard.press('Enter');
@@ -169,7 +169,7 @@ async function ask(page, text, { timeout = 180000, expectImage = false, imageRea
   await waitUntil(page, async () => {
     const t = await lastTurn(page);
     return t.count > before.count || (t.state === 'in_progress') || (await visible(page.locator(STOP)));
-  }, { timeout: 60000, label: 'ChatGPT to start answering', site: 'ChatGPT', shouldAbort });
+  }, { timeout: 180000, label: 'ChatGPT to start answering', site: 'ChatGPT', shouldAbort });
 
   let lastSig = '';
   let stableSince = Date.now();
@@ -301,7 +301,7 @@ async function sendAndCaptureImage(page, message, { shouldAbort } = {}) {
   page.on('response', onResponse);
   let result;
   try {
-    result = await ask(page, message, { expectImage: true, imageReady: () => captured.length > 0, timeout: 12 * 60 * 1000, shouldAbort });
+    result = await ask(page, message, { expectImage: true, imageReady: () => captured.length > 0, timeout: 20 * 60 * 1000, shouldAbort });
   } finally {
     page.off('response', onResponse);
   }

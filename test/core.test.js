@@ -252,3 +252,25 @@ test('published posts leave the list and are only counted in the stats', () => {
   assert.strictEqual(store.stats(day).todayPublished, 1);
   store.close();
 });
+
+test('slow internet: page opening retries network errors; failed attempts retry after 2 minutes', async () => {
+  const { gotoSafe } = require('../src/main/automation/util');
+  let calls = 0;
+  const fakePage = { goto: async () => { calls++; if (calls < 3) throw new Error('page.goto: net::ERR_CONNECTION_RESET at https://x'); } };
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = (fn) => realSetTimeout(fn, 0); // skip the waits in the test
+  try { await gotoSafe(fakePage, 'https://x'); } finally { global.setTimeout = realSetTimeout; }
+  assert.strictEqual(calls, 3, 'opened on the third try');
+
+  const { Engine } = require('../src/main/engine');
+  const { UiError } = require('../src/main/automation/util');
+  const store = new Store(tmpDb());
+  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: { screenshots: os.tmpdir() }, log: { info() {}, warn() {}, error() {} } });
+  const id = store.createPost(dayKey(), Date.now());
+  store.updatePost(id, { status: 'uploading', attempts: 4, caption: 'c', image_path: __filename });
+  const before = Date.now();
+  await engine.handleError(id, new UiError('Timed out waiting for TikTok upload page'), null, engine.log);
+  const wait = store.getPost(id).scheduled_at - before;
+  assert.ok(wait >= 119000 && wait <= 125000, `retry after 2 minutes (got ${Math.round(wait / 1000)} s)`);
+  store.close();
+});

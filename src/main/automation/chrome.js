@@ -154,8 +154,9 @@ class ChromeConnection {
   async newPage() {
     const ctx = await this.context();
     const page = await ctx.newPage();
-    page.setDefaultTimeout(30000);
-    page.setDefaultNavigationTimeout(60000);
+    // Generous defaults for slow internet.
+    page.setDefaultTimeout(60000);
+    page.setDefaultNavigationTimeout(180000);
     this.ownPages.add(page);
     page.on('close', () => this.ownPages.delete(page));
     return page;

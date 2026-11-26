@@ -81,12 +81,32 @@ async function visible(locator) {
 // Click that survives popups/overlays: normal click -> close popups (dismiss) and retry -> forced click.
 // Throws a readable error naming the element instead of a bare "locator.click: Timeout 30000ms exceeded".
 async function safeClick(page, locator, label, dismiss) {
-  try { await locator.click({ timeout: 10000 }); return; } catch (_) { /* try again below */ }
+  try { await locator.click({ timeout: 20000 }); return; } catch (_) { /* try again below */ }
   if (dismiss) await dismiss(page).catch(() => {});
   await page.keyboard.press('Escape').catch(() => {});
-  try { await locator.click({ timeout: 10000 }); return; } catch (_) { /* last attempt below */ }
+  try { await locator.click({ timeout: 20000 }); return; } catch (_) { /* last attempt below */ }
   try { await locator.click({ timeout: 5000, force: true }); return; } catch (_) { /* give up */ }
   throw new UiError(`Could not click ${label} (it is hidden, disabled or covered by a popup)`);
+}
+
+// Opens a page in a way that survives slow / unstable internet: only waits for the first response (the caller
+// then waits for the actual element it needs) and retries network errors (reset, timeout, offline) up to 3 times.
+const NETWORK_ERROR_RE = /net::ERR_|Timeout \d+ms exceeded|NS_ERROR|ECONNRESET|socket hang up/i;
+async function gotoSafe(page, url, { tries = 3, timeout = 120000 } = {}) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await page.goto(url, { waitUntil: 'commit', timeout });
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (!NETWORK_ERROR_RE.test(e.message)) throw e;
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(10000 * (i + 1));
+    }
+  }
+  throw new Error(`Could not open ${url} (slow or no internet): ${lastErr.message.split('\n')[0]}`);
 }
 
 async function screenshot(page, dir, name) {
@@ -102,5 +122,5 @@ async function screenshot(page, dir, name) {
 module.exports = {
   NeedsHumanError, RateLimitError, UiError, AbortedError,
   sleep, normalize, wordSet, jaccard, sha256, captionKey,
-  detectChallenge, waitUntil, visible, safeClick, screenshot,
+  detectChallenge, waitUntil, visible, safeClick, gotoSafe, screenshot,
 };

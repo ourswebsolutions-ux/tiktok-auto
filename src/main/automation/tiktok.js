@@ -8,7 +8,7 @@
 //           each with a "Use" control. TikTok's own sound data (incl. user_count = number of videos using
 //           the sound) is read passively from the responses the picker itself loads.
 
-const { NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet, safeClick } = require('./util');
+const { NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet, safeClick, gotoSafe } = require('./util');
 
 const UPLOAD_URL = 'https://www.tiktok.com/tiktokstudio/upload?from=webapp';
 const MIN_SOUND_USES = 10000; // a sound must be visibly used in at least this many videos to count as popular
@@ -23,12 +23,12 @@ function assertNotLoginPage(page) {
 }
 
 async function openUploader(page, shouldAbort) {
-  await page.goto(UPLOAD_URL, { waitUntil: 'commit', timeout: 90000 });
+  await gotoSafe(page, UPLOAD_URL);
   // TikTok Studio can take 30-60 s to load on slow connections.
   await waitUntil(page, async () => {
     assertNotLoginPage(page);
     return (await page.locator('input[type=file]').count()) > 0;
-  }, { timeout: 180000, label: 'TikTok upload page', site: SITE, shouldAbort });
+  }, { timeout: 300000, label: 'TikTok upload page', site: SITE, shouldAbort });
 }
 
 // Read-only check: loads the uploader and confirms we are logged in. Uploads nothing.
@@ -56,14 +56,14 @@ const tclick = (page, locator, label) => safeClick(page, locator, label, dismiss
 
 async function uploadPhoto(page, imagePath, shouldAbort) {
   const photosTab = page.getByText('Photos', { exact: true }).first();
-  await waitUntil(page, () => visible(photosTab), { timeout: 30000, label: 'Photos tab on the upload page', site: SITE, shouldAbort });
+  await waitUntil(page, () => visible(photosTab), { timeout: 120000, label: 'Photos tab on the upload page', site: SITE, shouldAbort });
   await tclick(page, photosTab, 'TikTok "Photos" tab');
   const input = page.locator('input[type=file][accept*="image"]').first();
-  await waitUntil(page, async () => (await page.locator('input[type=file][accept*="image"]').count()) > 0, { timeout: 20000, label: 'photo file input', site: SITE });
+  await waitUntil(page, async () => (await page.locator('input[type=file][accept*="image"]').count()) > 0, { timeout: 60000, label: 'photo file input', site: SITE });
   await input.setInputFiles(imagePath);
   await waitUntil(page, async () => (await visible(page.getByRole('button', { name: /add sound/i })))
-    && (await visible(page.locator('[data-e2e=caption_container]'))), { timeout: 120000, label: 'TikTok post editor after photo upload', site: SITE, shouldAbort });
-  await waitUntil(page, () => visible(page.getByText(/1 photo uploaded/i)), { timeout: 60000, label: '"1 photo uploaded" confirmation', site: SITE });
+    && (await visible(page.locator('[data-e2e=caption_container]'))), { timeout: 600000, label: 'TikTok post editor after photo upload', site: SITE, shouldAbort });
+  await waitUntil(page, () => visible(page.getByText(/1 photo uploaded/i)), { timeout: 600000, label: '"1 photo uploaded" confirmation', site: SITE });
   await sleep(1500);
   await dismissInfoDialogs(page);
 }
@@ -119,7 +119,7 @@ async function openSoundPanel(page) {
   if (await visible(panel)) return panel;
   const btn = page.getByRole('button', { name: /^(\+\s*)?add sound$/i }).or(page.getByRole('button', { name: /^replace$/i }));
   await tclick(page, btn.first(), 'TikTok "Add sound"');
-  await waitUntil(page, () => visible(panel), { timeout: 20000, label: 'TikTok sound picker', site: SITE });
+  await waitUntil(page, () => visible(panel), { timeout: 60000, label: 'TikTok sound picker', site: SITE });
   return panel;
 }
 
@@ -139,8 +139,11 @@ async function searchSounds(page, panel, query) {
   const input = panel.getByPlaceholder('Search sounds');
   await input.fill('');
   await input.fill(query);
+  // Wait for TikTok's actual search results (slow internet), not a fixed time.
+  const results = page.waitForResponse((r) => r.url().includes('/api/search/music/full'), { timeout: 60000 }).catch(() => null);
   await input.press('Enter');
-  await sleep(4500);
+  await results;
+  await sleep(1500);
 }
 
 async function selectedSoundText(page) {
@@ -170,11 +173,11 @@ async function trySelectSound(page, cand, log) {
     if (!(await visible(use))) continue;
     // eslint-disable-next-line no-await-in-loop
     try { await tclick(page, use, `"Use" for sound "${cand.title}"`); } catch (e) { log.warn(e.message); return false; }
+    // Wait until TikTok shows the sound as selected (slow internet: up to 30 s).
     // eslint-disable-next-line no-await-in-loop
-    await sleep(2500);
-    // eslint-disable-next-line no-await-in-loop
-    const chosen = await selectedSoundText(page);
-    if (normalize(chosen).includes(normalize(cand.title))) return true;
+    const ok = await waitUntil(page, async () => normalize(await selectedSoundText(page)).includes(normalize(cand.title)),
+      { timeout: 30000, label: 'selected sound', site: SITE }).then(() => true).catch((e) => { if (e instanceof NeedsHumanError) throw e; return false; });
+    if (ok) return true;
     log.warn(`Sound "${cand.title}" did not show as selected after clicking Use.`);
     return false;
   }
@@ -198,7 +201,8 @@ async function attachSound(page, { keywords, topicKeywords, recentSounds, log })
   page.on('response', onResponse);
   try {
     const panel = await openSoundPanel(page);
-    await sleep(4000); // TikTok loads sounds recommended for the uploaded photo
+    // TikTok loads the sounds recommended for the uploaded photo (wait for them, up to 45 s on slow internet).
+    await waitUntil(page, () => candidates.size > 0, { timeout: 45000, label: 'TikTok sound recommendations', site: SITE }).catch(() => {});
     for (const kw of keywords.slice(0, 3)) {
       // eslint-disable-next-line no-await-in-loop
       await searchSounds(page, panel, kw);
@@ -236,7 +240,7 @@ async function setTitle(page, title) {
 
 async function setDescription(page, caption, hashtags) {
   const editor = page.locator('[data-e2e=caption_container] [contenteditable="true"]').first();
-  await waitUntil(page, () => visible(editor), { timeout: 20000, label: 'TikTok description editor', site: SITE });
+  await waitUntil(page, () => visible(editor), { timeout: 60000, label: 'TikTok description editor', site: SITE });
   await tclick(page, editor, 'TikTok description box');
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Backspace');
@@ -335,7 +339,7 @@ async function setSchedule(page, whenMs, log) {
   if (await visible(allow)) { await allow.first().click(); await sleep(1500); }
   if (!(await radio.isChecked())) await radio.check({ force: true });
   await waitUntil(page, () => visible(page.locator('.scheduled-picker [aria-label="Select date"]')),
-    { timeout: 15000, label: 'TikTok schedule date/time pickers', site: SITE });
+    { timeout: 60000, label: 'TikTok schedule date/time pickers', site: SITE });
 
   // TikTok's schedule clock can differ from this computer's clock (account/browser timezone): convert the post
   // time into the timezone TikTok shows, e.g. "(GMT+5) Local Time".
@@ -352,7 +356,7 @@ async function setSchedule(page, whenMs, log) {
   if ((await pickerValue(page, 'Select date')) !== wantDate) {
     await tclick(page, page.locator('.scheduled-picker [aria-label="Select date"]'), 'TikTok schedule date');
     const panel = page.locator('.DatePicker__panel').first();
-    await waitUntil(page, () => visible(panel), { timeout: 10000, label: 'TikTok date calendar', site: SITE });
+    await waitUntil(page, () => visible(panel), { timeout: 30000, label: 'TikTok date calendar', site: SITE });
     const dayLabel = MONTHS[d.getMonth()] + ' ' + ordinal(d.getDate()) + ', ' + d.getFullYear();
     const dayBtn = panel.locator('button[aria-label$="' + dayLabel + '"]').first();
     for (let i = 0; i < 2 && !(await visible(dayBtn)); i++) {
@@ -380,7 +384,7 @@ async function setSchedule(page, whenMs, log) {
     await tclick(page, page.locator('.scheduled-picker [aria-label="Select time"]'), 'TikTok schedule time');
     const cols = page.locator('.TimePicker__column');
     await waitUntil(page, async () => (await cols.count()) >= 2 && (await visible(cols.first())),
-      { timeout: 10000, label: 'TikTok time picker', site: SITE });
+      { timeout: 30000, label: 'TikTok time picker', site: SITE });
     const hourItem = cols.nth(0).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + hh + '$') }).first();
     const minItem = cols.nth(1).locator('.TimePicker__item').filter({ hasText: new RegExp('^' + mm + '$') }).first();
     if (await isDisabled(hourItem)) {
@@ -416,7 +420,7 @@ async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
   // With "Schedule" selected TikTok renames the Post button to "Schedule" (the radio label is not a button).
   const postBtn = page.getByRole('button', { name: buttonName, exact: true }).last();
   await waitUntil(page, async () => (await visible(postBtn)) && (await postBtn.isEnabled()) && (await postBtn.getAttribute('aria-disabled')) !== 'true',
-    { timeout: 60000, label: 'enabled ' + buttonName + ' button', site: SITE, shouldAbort });
+    { timeout: 600000, label: 'enabled ' + buttonName + ' button', site: SITE, shouldAbort });
   const startUrl = page.url();
   await tclick(page, postBtn, 'TikTok "' + buttonName + '" button');
   const res = await waitUntil(page, async () => {
@@ -427,7 +431,7 @@ async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
     if (page.url() !== startUrl && /tiktokstudio\/(content|post)/.test(page.url())) return { ok: true, signal: 'redirected to Posts page' };
     if (SUCCESS_RE.test(text)) return { ok: true, signal: (text.match(SUCCESS_RE) || [''])[0] };
     return null;
-  }, { timeout: 180000, interval: 1000, label: 'TikTok publish confirmation', site: SITE }).catch((e) => ({ ok: false, message: e.message, timeout: true }));
+  }, { timeout: 300000, interval: 1000, label: 'TikTok publish confirmation', site: SITE }).catch((e) => ({ ok: false, message: e.message, timeout: true }));
   return res;
 }
 

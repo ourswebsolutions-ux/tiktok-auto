@@ -9,7 +9,7 @@
 //               "=s0" on that URL returns the original (768x1376 JPEG on the free plan)
 //   regenerate: "Redo" button on the answer
 
-const { NeedsHumanError, RateLimitError, UiError, sleep, waitUntil, visible, safeClick, detectChallenge } = require('./util');
+const { NeedsHumanError, RateLimitError, UiError, sleep, waitUntil, visible, safeClick, gotoSafe, detectChallenge } = require('./util');
 const { generatePostWith, imageSize } = require('./chatgpt');
 
 const GEMINI_URL = 'https://gemini.google.com/app';
@@ -61,9 +61,9 @@ async function lastTurn(page) {
 
 // Opens a NEW, empty Gemini chat (every post gets its own chat).
 async function openChat(page, opts = {}) {
-  await page.goto(GEMINI_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
+  await gotoSafe(page, GEMINI_URL);
   await waitUntil(page, async () => (await visible(page.locator(COMPOSER).filter({ visible: true }))) || (await signedOut(page)),
-    { timeout: 60000, label: 'Gemini message box', site: 'Gemini', shouldAbort: opts.shouldAbort });
+    { timeout: 180000, label: 'Gemini message box', site: 'Gemini', shouldAbort: opts.shouldAbort });
   if (await signedOut(page)) {
     throw new NeedsHumanError('Gemini is not logged in in your Chrome profile. Please sign in to gemini.google.com in Chrome.', { site: 'Gemini', page });
   }
@@ -72,15 +72,15 @@ async function openChat(page, opts = {}) {
   if ((await lastTurn(page)).count > 0) {
     const newChat = page.getByRole('button', { name: /^new chat$/i }).or(page.getByRole('link', { name: /^new chat$/i })).first();
     await safeClick(page, newChat, 'Gemini "New chat"', dismissOverlays);
-    await waitUntil(page, async () => (await lastTurn(page)).count === 0, { timeout: 20000, label: 'a new empty Gemini chat', site: 'Gemini' });
+    await waitUntil(page, async () => (await lastTurn(page)).count === 0, { timeout: 60000, label: 'a new empty Gemini chat', site: 'Gemini' });
   }
 }
 
 // Read-only check used by "Check Chrome". Sends nothing.
 async function checkGemini(page) {
-  await page.goto(GEMINI_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
+  await gotoSafe(page, GEMINI_URL);
   try {
-    await waitUntil(page, async () => (await visible(page.locator(COMPOSER).filter({ visible: true }))) || (await signedOut(page)), { timeout: 45000, label: 'Gemini message box', site: 'Gemini' });
+    await waitUntil(page, async () => (await visible(page.locator(COMPOSER).filter({ visible: true }))) || (await signedOut(page)), { timeout: 120000, label: 'Gemini message box', site: 'Gemini' });
   } catch (e) {
     const ch = await detectChallenge(page);
     return { ok: false, detail: ch ? `${ch} - solve it in Chrome` : `page did not load normally (${e.message})` };
@@ -106,7 +106,7 @@ async function typeIntoComposer(page, text) {
 }
 
 // Sends a message (text = null: press Gemini's "Redo" on the last answer) and waits for the complete answer.
-async function ask(page, text, { timeout = 180000, expectImage = false, imageReady = () => false, shouldAbort } = {}) {
+async function ask(page, text, { timeout = 600000, expectImage = false, imageReady = () => false, shouldAbort } = {}) {
   const before = await lastTurn(page);
   const redoBtn = page.locator('model-response').last().getByRole('button', { name: /^redo$/i }).first();
   if (text === null && (await visible(redoBtn))) {
@@ -122,7 +122,7 @@ async function ask(page, text, { timeout = 180000, expectImage = false, imageRea
   await waitUntil(page, async () => {
     const t = await lastTurn(page);
     return t.count > before.count || (await visible(page.locator(STOP)));
-  }, { timeout: 60000, label: 'Gemini to start answering', site: 'Gemini', shouldAbort });
+  }, { timeout: 180000, label: 'Gemini to start answering', site: 'Gemini', shouldAbort });
 
   let lastSig = '';
   let stableSince = Date.now();
@@ -164,7 +164,7 @@ async function sendAndCaptureImage(page, message, { shouldAbort } = {}) {
   page.on('response', onResponse);
   let result;
   try {
-    result = await ask(page, message, { expectImage: true, imageReady: () => bodies.length > 0, timeout: 8 * 60 * 1000, shouldAbort });
+    result = await ask(page, message, { expectImage: true, imageReady: () => bodies.length > 0, timeout: 20 * 60 * 1000, shouldAbort });
   } finally {
     page.off('response', onResponse);
   }
