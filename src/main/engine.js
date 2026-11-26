@@ -141,6 +141,15 @@ class Engine extends EventEmitter {
     if (this.running) setTimeout(() => this.tick(), 200);
   }
 
+  // Sound on each post: 'urdu' = spoken Urdu motivational lines (default), 'music' = mood-matching music.
+  soundStyle() { return this.store.getSetting('sound_style', 'urdu') === 'music' ? 'music' : 'urdu'; }
+
+  setSoundStyle(style) {
+    this.store.setSetting('sound_style', style === 'music' ? 'music' : 'urdu');
+    this.log.info(`Sound: ${this.soundStyle() === 'urdu' ? 'Urdu motivational lines' : 'music'}`);
+    this.emit('change');
+  }
+
   // 'software' = the app publishes each post at its calculated time (default).
   // 'tiktok'   = posts are uploaded ahead of time and scheduled with TikTok's own "Schedule" option.
   schedulingMode() { return this.store.getSetting('scheduling_mode', 'software') === 'tiktok' ? 'tiktok' : 'software'; }
@@ -429,6 +438,7 @@ class Engine extends EventEmitter {
         recentSounds,
         onProgress: step,
         scheduleAt,
+        soundStyle: this.soundStyle(),
         beforePost: async (sound) => {
           // Persisted BEFORE clicking Post/Schedule. The unique index on caption_key throws if this caption was
           // already posted, so a post can never be submitted twice.
@@ -566,6 +576,7 @@ class Engine extends EventEmitter {
       dailyQuantity: this.dailyQuantity(),
       schedulingMode: this.schedulingMode(),
       aiProvider: this.aiProvider(),
+      soundStyle: this.soundStyle(),
       stats: this.store.stats(today),
       prompts: this.store.listPrompts(),
       history: this.store.history(150).map((h) => ({ ...h, hashtags: h.hashtags ? JSON.parse(h.hashtags) : [] })),

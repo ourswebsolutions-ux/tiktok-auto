@@ -129,7 +129,18 @@ The app runs two workers at the same time, each in its own Chrome tab:
 - The posting schedule shows the latest 5 waiting / in-progress posts with image previews; *Show all* expands the
   list. Published posts and posts already scheduled on TikTok are only counted in the statistics.
 
-## How the music is chosen
+## How the sound is chosen
+
+The *Sound* setting on the dashboard selects what is attached to each post:
+
+- **Urdu motivation** (default): spoken Urdu motivational lines. The TikTok sound library is searched with 3 random
+  Urdu motivation phrases ("urdu motivation", "motivational speech urdu", "urdu poetry motivation", ...); sounds that
+  TikTok marks as spoken (human voice) and Urdu/Hindi are preferred, and a **random** one of the best matches is used
+  so posts get different lines. Recently used sounds are skipped; popularity must still be verifiable (at least
+  2,000 videos).
+- **Music**: background music that fits the post's mood, as described below.
+
+### Music
 
 TikTok's sound picker loads TikTok's own data for every sound, including **how many videos use it**. The app reads that
 data (exactly what the picker loads) and:

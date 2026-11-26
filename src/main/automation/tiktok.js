@@ -91,17 +91,37 @@ function collectMusic(json, source, into) {
       id, title: String(m.title), author: String(m.author || m.owner_nickname || ''), userCount: Number(m.user_count) || 0,
       duration: Number(m.duration) || 0, desc: `${m.album || ''} ${m.search_music_desc || ''} ${tags}`,
       shootingAllowed: m.is_shooting_allow !== false, reusable: m.can_not_reuse !== true, sources: [],
+      humanVoice: m.has_human_voice === true || m.has_human_voice === 1, language: String(m.language || ''),
     };
     entry.sources.push({ source, position: idx });
     into.set(id, entry);
   });
 }
 
-function rankSounds(candidates, { keywords, topicKeywords, recentSounds }) {
+// Sound styles: 'urdu' = spoken Urdu motivational lines (default), 'music' = background music matching the mood.
+const URDU_SOUND_QUERIES = [
+  'urdu motivation', 'motivational speech urdu', 'urdu motivational quotes', 'urdu poetry motivation',
+  'motivational lines urdu', 'urdu success motivation', 'zindagi motivation urdu', 'hindi urdu motivational speech',
+  'urdu inspirational quotes', 'kamyabi motivation urdu',
+];
+const URDU_TOPIC_WORDS = ['urdu', 'motivation', 'motivational', 'speech', 'quotes', 'poetry', 'zindagi', 'kamyabi', 'inspirational', 'success'];
+const MIN_SPOKEN_SOUND_USES = 2000; // spoken clips are used less often than songs
+
+function shuffle(list) {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+function rankSounds(candidates, { keywords, topicKeywords, recentSounds, style = 'music' }) {
+  const urdu = style === 'urdu';
   const want = wordSet([...keywords, ...topicKeywords].join(' '));
   const recent = new Set((recentSounds || []).map((s) => normalize(s)));
+  const minUses = urdu ? MIN_SPOKEN_SOUND_USES : MIN_SOUND_USES;
   return [...candidates.values()]
-    .filter((c) => c.shootingAllowed && c.reusable && c.userCount >= MIN_SOUND_USES)
+    .filter((c) => c.shootingAllowed && c.reusable && c.userCount >= minUses)
+    // Urdu lines: only sounds found by an Urdu motivation search (not TikTok's general music suggestions).
+    .filter((c) => !urdu || c.sources.some((s) => s.source.startsWith('search:')))
     .filter((c) => !recent.has(normalize(`${c.title} - ${c.author}`)))
     .map((c) => {
       const words = wordSet(`${c.title} ${c.author} ${c.desc}`);
@@ -111,8 +131,11 @@ function rankSounds(candidates, { keywords, topicKeywords, recentSounds }) {
       const recommended = c.sources.some((s) => s.source === 'recommended-for-this-photo');
       // Relevance first (TikTok search match for our topic keywords, TikTok's own photo-based recommendation,
       // keyword overlap), then verified popularity (number of videos using the sound).
-      const relevance = searchHits * 2 + (recommended ? 1.5 : 0) + overlap * 1.5 + (topRank < 5 ? 1 : 0);
-      return { ...c, relevance, score: relevance * 2 + Math.log10(c.userCount) };
+      let relevance = searchHits * 2 + (recommended ? 1.5 : 0) + overlap * 1.5 + (topRank < 5 ? 1 : 0);
+      // Urdu lines: prefer sounds TikTok marks as spoken (human voice) and Urdu/Hindi language.
+      if (urdu) relevance += (c.humanVoice ? 3 : 0) + (/^(ur|hi)\b|urdu|hindi/i.test(c.language) ? 2 : 0);
+      const firstSearch = c.sources.find((s) => s.source.startsWith('search:'));
+      return { ...c, relevance, score: relevance * 2 + Math.log10(c.userCount), query: firstSearch ? firstSearch.source.slice(7) : '' };
     })
     .filter((c) => c.relevance > 0)
     .sort((a, b) => b.score - a.score);
@@ -167,7 +190,8 @@ async function selectedSoundText(page) {
 
 async function trySelectSound(page, cand, log) {
   const panel = await openSoundPanel(page);
-  await searchSounds(page, panel, `${cand.title} ${cand.author}`.slice(0, 80));
+  // Re-open the search that found the sound (spoken clips often have generic titles like "original sound - x").
+  await searchSounds(page, panel, (cand.query || `${cand.title} ${cand.author}`).slice(0, 80));
   const rows = panel.locator('[class*="MusicPanelMusicItem"]').filter({ hasText: cand.title });
   const n = await rows.count();
   for (let i = 0; i < n; i++) {
@@ -194,9 +218,14 @@ async function trySelectSound(page, cand, log) {
   return false;
 }
 
-// Picks the most relevant sound with verifiable popularity and attaches it. Never picks at random:
-// if nothing relevant with visible popularity can be attached, the post goes out without an added sound.
-async function attachSound(page, { keywords, topicKeywords, recentSounds, log }) {
+// Picks a relevant sound with verifiable popularity and attaches it.
+// style 'urdu': Urdu motivational lines - searched with random Urdu motivation phrases, spoken sounds preferred, and a
+// random one of the best matches is used so posts get different lines. style 'music': the best mood match.
+// If nothing suitable can be attached, the post goes out without an added sound.
+async function attachSound(page, { keywords: musicKeywords, topicKeywords: postTopics, recentSounds, log, style = 'urdu' }) {
+  const urdu = style === 'urdu';
+  const keywords = urdu ? shuffle(URDU_SOUND_QUERIES).slice(0, 3) : musicKeywords;
+  const topicKeywords = urdu ? URDU_TOPIC_WORDS : postTopics;
   const candidates = new Map();
   const onResponse = async (r) => {
     const u = r.url();
@@ -216,16 +245,18 @@ async function attachSound(page, { keywords, topicKeywords, recentSounds, log })
       // eslint-disable-next-line no-await-in-loop
       await searchSounds(page, panel, kw);
     }
-    const ranked = rankSounds(candidates, { keywords, topicKeywords, recentSounds });
-    log.info(`Sound candidates with verified popularity: ${ranked.length} (of ${candidates.size} seen).`);
-    for (const cand of ranked.slice(0, 5)) {
+    const ranked = rankSounds(candidates, { keywords, topicKeywords, recentSounds, style });
+    log.info(`${urdu ? 'Urdu motivational' : 'Music'} sound candidates with verified popularity: ${ranked.length} (of ${candidates.size} seen).`);
+    // Urdu lines: a random one of the 8 best matches (variety); music: best match first.
+    const order = urdu ? shuffle(ranked.slice(0, 8)) : ranked.slice(0, 5);
+    for (const cand of order) {
       log.info(`Trying sound "${cand.title}" by ${cand.author} (used in ${fmtCount(cand.userCount)} videos, relevance ${cand.relevance.toFixed(1)}).`);
       // eslint-disable-next-line no-await-in-loop
       if (await trySelectSound(page, cand, log)) {
         const via = cand.sources.some((s) => s.source.startsWith('search:')) ? `TikTok search for "${cand.sources.find((s) => s.source.startsWith('search:')).source.slice(7)}"` : 'TikTok recommendation for this photo';
         return {
           title: `${cand.title} - ${cand.author}`,
-          evidence: `Used in ${fmtCount(cand.userCount)} TikTok videos (TikTok sound data); matched via ${via}`,
+          evidence: `${urdu ? 'Urdu motivational sound - ' : ''}Used in ${fmtCount(cand.userCount)} TikTok videos (TikTok sound data); matched via ${via}`,
         };
       }
     }
@@ -462,17 +493,17 @@ async function publishPhotoPost(page, post, opts) {
   }
 }
 
-async function publishWithMonitor(page, post, { log, shouldAbort, recentSounds, beforePost, onProgress, scheduleAt = null, monitor }) {
+async function publishWithMonitor(page, post, { log, shouldAbort, recentSounds, beforePost, onProgress, scheduleAt = null, monitor, soundStyle = 'urdu' }) {
   onProgress('Opening TikTok Studio');
   await openUploader(page, shouldAbort, monitor, onProgress);
   onProgress('Uploading image to TikTok');
   await uploadPhoto(page, post.image_path, shouldAbort, monitor, onProgress);
 
-  onProgress('Selecting a relevant popular sound');
+  onProgress(soundStyle === 'urdu' ? 'Selecting Urdu motivational lines (sound)' : 'Selecting a relevant popular sound');
   let sound = null;
   try {
     sound = await attachSound(page, {
-      keywords: JSON.parse(post.music_keywords || '[]'), topicKeywords: JSON.parse(post.topic_keywords || '[]'), recentSounds, log,
+      keywords: JSON.parse(post.music_keywords || '[]'), topicKeywords: JSON.parse(post.topic_keywords || '[]'), recentSounds, log, style: soundStyle,
     });
   } catch (e) {
     if (e instanceof NeedsHumanError) throw e;
@@ -521,4 +552,4 @@ async function publishWithMonitor(page, post, { log, shouldAbort, recentSounds, 
   };
 }
 
-module.exports = { checkTikTok, publishPhotoPost, rankSounds, collectMusic, tiktokScheduleTime, tzOffsetMinutes, wallClock, MIN_SOUND_USES };
+module.exports = { checkTikTok, publishPhotoPost, rankSounds, URDU_SOUND_QUERIES, collectMusic, tiktokScheduleTime, tzOffsetMinutes, wallClock, MIN_SOUND_USES };

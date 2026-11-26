@@ -268,6 +268,13 @@ export default function App() {
             <button type="button" role="radio" aria-checked={state.aiProvider === 'gemini'} className={state.aiProvider === 'gemini' ? 'on' : ''} onClick={() => api.setAiProvider('gemini').then(refresh)}>Gemini</button>
           </div>
         </div>
+        <div className="setting" role="radiogroup" aria-label="Sound on posts">
+          <label>Sound</label>
+          <div className="segmented">
+            <button type="button" role="radio" aria-checked={state.soundStyle !== 'music'} className={state.soundStyle !== 'music' ? 'on' : ''} onClick={() => api.setSoundStyle('urdu').then(refresh)}>Urdu motivation</button>
+            <button type="button" role="radio" aria-checked={state.soundStyle === 'music'} className={state.soundStyle === 'music' ? 'on' : ''} onClick={() => api.setSoundStyle('music').then(refresh)}>Music</button>
+          </div>
+        </div>
         <div className="setting" role="radiogroup" aria-label="Scheduling">
           <label>Scheduling</label>
           <div className="segmented">

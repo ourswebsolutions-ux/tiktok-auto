@@ -6,6 +6,7 @@
 //   npm run dry-run -- "your prompt"     (uses one ChatGPT image generation)
 //   options: --tiktok-schedule  also fill in TikTok's own Schedule date/time (TikTok-Based mode), ~2 hours ahead
 //            --days-ahead <n>   with --tiktok-schedule: schedule n days later (max 9)
+//            --sound urdu|music  sound on the post (default: Urdu motivational lines)
 //            --gemini           create image + caption with Gemini instead of ChatGPT
 //            --image <file>     skip ChatGPT and use an existing image with sample caption (tests the TikTok part only)
 const fs = require('fs');
@@ -24,6 +25,7 @@ class DryRunStop extends Error {}
   const tiktokSchedule = !!take('--tiktok-schedule', false);
   const existingImage = take('--image', true);
   const useGemini = !!take('--gemini', false);
+  const soundStyle = take('--sound', true) === 'music' ? 'music' : 'urdu';
   const daysAhead = Number(take('--days-ahead', true) || 0);
   const userPrompt = args.join(' ')
     || 'Create a vertical 9:16 motivational image with the text "Start before you are ready" in bold white letters on a cinematic sunrise background.';
@@ -54,6 +56,7 @@ class DryRunStop extends Error {}
     try {
       await tiktok.publishPhotoPost(page, post, {
         log, recentSounds: [], onProgress: (s) => log.info(`TikTok: ${s}`),
+        soundStyle,
         scheduleAt: tiktokSchedule ? tiktok.tiktokScheduleTime(Date.now() + daysAhead * 86400e3 + 2 * 3600e3) : null,
         beforePost: async (sound) => {
           log.info(`Sound: ${sound ? `${sound.title} | ${sound.evidence}` : 'none attached'}`);

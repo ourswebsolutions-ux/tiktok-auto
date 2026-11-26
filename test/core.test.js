@@ -308,3 +308,22 @@ test('image generation and TikTok upload run at the same time (one never waits f
   await wait(600);
   store.close();
 });
+
+test('sound: Urdu motivational lines - only Urdu-search results, spoken sounds preferred, random among the best', () => {
+  const { rankSounds, collectMusic, URDU_SOUND_QUERIES } = require('../src/main/automation/tiktok');
+  const m = new Map();
+  collectMusic({ music_list: [{ id_str: 'm1', title: 'Party Hit', author: 'DJ', user_count: 9000000 }] }, 'recommended-for-this-photo', m);
+  collectMusic({ data: [
+    { music_info: { id_str: 'u1', title: 'original sound - motivator', author: 'Urdu Speaker', user_count: 45000, has_human_voice: true, language: 'ur' } },
+    { music_info: { id_str: 'u2', title: 'Kamyabi ka raaz', author: 'Quotes', user_count: 12000, has_human_voice: true } },
+    { music_info: { id_str: 'u3', title: 'Calm beat', author: 'Beats', user_count: 800000, has_human_voice: false } },
+    { music_info: { id_str: 'u4', title: 'Tiny clip', author: 'x', user_count: 100, has_human_voice: true } },
+  ] }, 'search:urdu motivation', m);
+  const ranked = rankSounds(m, { keywords: ['urdu motivation'], topicKeywords: ['urdu', 'motivation'], recentSounds: [], style: 'urdu' });
+  const ids = ranked.map((r) => r.id);
+  assert.ok(!ids.includes('m1'), 'general music suggestions are not used for Urdu lines');
+  assert.ok(!ids.includes('u4'), 'popularity must still be verifiable');
+  assert.deepStrictEqual(ids.slice(0, 2).sort(), ['u1', 'u2'], 'spoken (human voice) sounds rank first');
+  assert.strictEqual(ranked[0].query, 'urdu motivation', 'remembers the search that found it');
+  assert.ok(URDU_SOUND_QUERIES.length >= 8);
+});

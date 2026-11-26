@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   setDailyQuantity: (n) => ipcRenderer.invoke('quantity:set', n),
   setSchedulingMode: (mode) => ipcRenderer.invoke('mode:set', mode),
   setAiProvider: (p) => ipcRenderer.invoke('ai:set', p),
+  setSoundStyle: (v) => ipcRenderer.invoke('sound:set', v),
   start: () => ipcRenderer.invoke('automation:start'),
   stop: () => ipcRenderer.invoke('automation:stop'),
   resume: () => ipcRenderer.invoke('automation:resume'),
