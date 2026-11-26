@@ -36,8 +36,6 @@ function retryDelayMs(attempt) {
 }
 // TikTok-based mode keeps this many days scheduled ahead (TikTok allows scheduling up to 10 days ahead).
 const TIKTOK_DAYS_AHEAD = 10;
-// TikTok accepts at most this many scheduled posts at a time.
-const TIKTOK_SCHEDULE_LIMIT = 30;
 // Continuous generation plans new days ahead of time - at most this far (safety cap for disk space).
 const MAX_QUEUE_DAYS = 365;
 const BROWSER_GONE_RE = /Target (page, context or browser )?(has been )?closed|Browser has been closed|browser has disconnected|has been disconnected|Connection closed|WebSocket is not open/i;
@@ -515,13 +513,7 @@ class Engine extends EventEmitter {
     return this.runWorker('upload', () => {
       const now = Date.now();
       const tiktokMode = this.schedulingMode() === 'tiktok';
-      if (tiktokMode) {
-        const used = this.store.countFutureTikTokScheduled(now);
-        if (used >= TIKTOK_SCHEDULE_LIMIT) {
-          this.setWorker('upload', { state: 'waiting', postId: null, text: `TikTok limit reached (${used}/${TIKTOK_SCHEDULE_LIMIT} scheduled) - continues when a scheduled post goes live` });
-          return null;
-        }
-      }
+      // No upload limit of our own: if TikTok refuses a post (e.g. its own limit), the post is simply retried.
       // TikTok-based: within TikTok's scheduling window (10 days); software-based: when the posting time has come.
       const maxSlot = tiktokMode ? now + TIKTOK_DAYS_AHEAD * 86400e3 - 3600e3 : now;
       const post = this.store.nextToUpload(now, { maxSlot });
@@ -774,7 +766,6 @@ class Engine extends EventEmitter {
         scheduledOnTikTok: this.store.countFutureTikTokScheduled(Date.now()),
         published: this.store.stats(today).totalPublished,
         publishedToday: this.store.stats(today).todayPublished,
-        limit: TIKTOK_SCHEDULE_LIMIT,
       },
       exportDir: this.dirs.export || null,
       dailyQuantity: this.dailyQuantity(),

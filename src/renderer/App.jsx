@@ -204,8 +204,7 @@ export default function App() {
 
   const q = state.queue || { waitingForImage: 0, generating: 0, ready: 0, uploading: 0 };
   const sw = state.switches || { generate: false, upload: false };
-  const ov = state.overview || { imagesGenerated: 0, pendingUpload: 0, scheduledOnTikTok: 0, published: 0, publishedToday: 0, limit: 30 };
-  const limitFull = ov.scheduledOnTikTok >= ov.limit;
+  const ov = state.overview || { imagesGenerated: 0, pendingUpload: 0, scheduledOnTikTok: 0, published: 0, publishedToday: 0 };
   const gm = state.genMode || { mode: 'single', tabs: 5, active: 1 };
   const aiName = state.aiProvider === 'gemini' ? 'Gemini' : 'ChatGPT';
 
@@ -278,11 +277,6 @@ export default function App() {
         <div className="card stat"><span className="num">{ov.pendingUpload}</span><span className="lbl">Posts pending upload</span></div>
         <div className="card stat"><span className="num">{ov.scheduledOnTikTok}</span><span className="lbl">Posts scheduled on TikTok</span></div>
         <div className="card stat"><span className="num">{ov.published}</span><span className="lbl">Posts published{ov.publishedToday ? ` · ${ov.publishedToday} today` : ''}</span></div>
-        <div className={`card stat ${limitFull ? 'limit-full' : ''}`}>
-          <span className="num">{ov.scheduledOnTikTok}/{ov.limit}</span>
-          <span className="lbl">{limitFull ? 'Upload limit reached - waits for free slots' : `Upload limit · ${ov.limit - ov.scheduledOnTikTok} slots free`}</span>
-          <div className="bar"><span style={{ width: `${Math.min(100, (ov.scheduledOnTikTok / ov.limit) * 100)}%` }} /></div>
-        </div>
       </section>
 
       <section className="card settings">

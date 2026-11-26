@@ -353,27 +353,24 @@ test('switches: Generate and Auto upload work independently; both off pauses eve
   store.close();
 });
 
-test('TikTok limit: never more than 30 scheduled posts; generation continues past it', () => {
+test('no upload limit of our own: uploading continues even with 30+ posts scheduled on TikTok', () => {
   const store = new Store(tmpDb());
   const now = Date.now();
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 35; i++) {
     const id = store.createPost(dayKey(), now + (i + 1) * 3600e3);
     store.updatePost(id, { status: 'tiktok_scheduled', published_at: now + (i + 1) * 3600e3, caption_key: `k${i}` });
   }
-  assert.strictEqual(store.countFutureTikTokScheduled(now), 30);
   const engine = makeEngine(store);
   store.setSetting('scheduling_mode', 'tiktok');
   store.setSetting('upload_enabled', '1');
   const r = store.createPost(dayKey(), now + 2 * 3600e3);
   store.updatePost(r, { status: 'ready', caption: 'c', image_path: __filename });
-  let picked = 'none';
+  let picked = null;
   engine.runWorker = async (key, pick) => { picked = pick(); };
   engine.runUploadWorker();
-  assert.strictEqual(picked, null, 'no upload while 30 posts are scheduled');
-  assert.ok(/30\/30/.test(engine.workers.upload.text));
+  assert.ok(picked && picked.id === r, 'the next ready post is uploaded - TikTok itself decides');
   store.close();
 });
-
 test('continuous generation plans the next day when every planned post has its image', () => {
   const store = new Store(tmpDb());
   store.setSetting('daily_quantity', '4');

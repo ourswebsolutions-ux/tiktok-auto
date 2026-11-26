@@ -134,7 +134,7 @@ td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top
 .bar span { display: block; height: 100%; background: var(--busy); transition: width 0.4s; }
 
 /* ---------- stats under the status ---------- */
-.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 14px; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
 .stats .card { margin-bottom: 0; padding: 14px 16px; }
 
 /* ---------- settings ---------- */

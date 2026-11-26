@@ -106,14 +106,14 @@ posting times are the same in both modes, and automation runs continuously until
   ON again continues with the existing queue.
 - **Export folder:** every generated post is saved to *Documents/TikTok Auto Poster Export* – the image plus a
   `.txt` and `.json` with title, caption, hashtags, posting date and prompt (*Open export folder* on the dashboard).
-- **TikTok limit:** in TikTok-Based mode at most **30** posts are scheduled on TikTok at a time (and only within
-  TikTok's 10-day window). When a scheduled post goes live a slot frees up and the next post is uploaded automatically.
+- **No upload limit in the app:** with *Auto upload* ON every ready post is uploaded (TikTok-Based: within
+  TikTok's 10-day scheduling window). If TikTok itself refuses a post (for example its own limit), the app simply
+  keeps retrying it.
 - **No image from ChatGPT:** if it answers with text or fails, the app sends: *"Please generate the image anyway.
   Generate the actual image NOW. Do not provide explanations, suggestions, or text. I need the actual image output.
   Try again using a new original creative concept."* – and keeps retrying (with short pauses) until a real image file
   is received or Generate is switched OFF. Text is never saved as an image.
-- Status cards: *Images generated*, *Posts pending upload*, *Posts scheduled on TikTok*, *Posts published*,
-  *Upload limit* (x/30).
+- Status cards: *Images generated*, *Posts pending upload*, *Posts scheduled on TikTok*, *Posts published*.
 
 ## Generation mode: single tab or multiple tabs in parallel
 
