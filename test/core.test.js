@@ -257,7 +257,7 @@ test('published and TikTok-scheduled posts leave the list and are only counted i
   store.close();
 });
 
-test('slow internet: page opening retries network errors; failed attempts retry after 2 minutes', async () => {
+test('slow internet: page opening retries network errors; failed attempts retry immediately, then after 1 minute', async () => {
   const { gotoSafe } = require('../src/main/automation/util');
   let calls = 0;
   const fakePage = { goto: async () => { calls++; if (calls < 3) throw new Error('page.goto: net::ERR_CONNECTION_RESET at https://x'); } };
@@ -275,6 +275,10 @@ test('slow internet: page opening retries network errors; failed attempts retry 
   const before = Date.now();
   await engine.handleError(id, new UiError('Timed out waiting for TikTok upload page'), null, engine.log);
   const wait = store.getPost(id).scheduled_at - before;
-  assert.ok(wait >= 119000 && wait <= 125000, `retry after 2 minutes (got ${Math.round(wait / 1000)} s)`);
+  assert.ok(wait >= 59000 && wait <= 65000, `later retries after 1 minute (got ${Math.round(wait / 1000)} s)`);
+  store.updatePost(id, { status: 'uploading', attempts: 1 });
+  const before2 = Date.now();
+  await engine.handleError(id, new UiError('Timed out waiting for TikTok upload page'), null, engine.log);
+  assert.ok(store.getPost(id).scheduled_at - before2 < 3000, 'first retry immediately');
   store.close();
 });

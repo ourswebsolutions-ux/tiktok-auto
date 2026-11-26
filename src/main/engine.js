@@ -23,8 +23,9 @@ const {
 
 const TICK_MS = 15000;
 const MAX_ATTEMPTS = 6;
-// Wait before retrying a failed attempt (minutes).
-const RETRY_DELAY_MIN = 2;
+// Retrying a failed attempt: the first retry immediately, further retries after at most 1 minute.
+const RETRY_DELAY_MS = 60 * 1000;
+const retryDelayMs = (attempts) => (attempts <= 1 ? 0 : RETRY_DELAY_MS);
 // TikTok-based mode keeps this many days scheduled ahead (TikTok allows scheduling up to 10 days ahead).
 const TIKTOK_DAYS_AHEAD = 10;
 const TIKTOK_UPLOAD_PAUSE_MS = 60 * 1000; // TikTok-based mode: short pause between uploads
@@ -43,6 +44,7 @@ class Engine extends EventEmitter {
     this.abortRequested = false;
     this.attention = null; // { message, kind, page }
     this.lastRunEnd = 0;
+    this.lastRunPostId = null;
     this.status = { phase: 'stopped', step: '', message: '', instructions: '', currentPostId: null };
   }
 
@@ -244,10 +246,12 @@ class Engine extends EventEmitter {
           return;
         }
         const next = head.post;
-        if (now - this.lastRunEnd < TIKTOK_UPLOAD_PAUSE_MS) return; // short pause between uploads
+        // Short pause only between different posts; a retry of the same post runs right away.
+        if (next.id !== this.lastRunPostId && now - this.lastRunEnd < TIKTOK_UPLOAD_PAUSE_MS) return;
         const pausedUntil = this.chatgptPaused(next);
         if (pausedUntil) { this.pausedStatus(pausedUntil); return; }
         await this.runPost(next);
+        setTimeout(() => this.tick(), 1000); // continue right away (e.g. an immediate retry)
         return;
       }
 
@@ -266,6 +270,7 @@ class Engine extends EventEmitter {
       const pausedUntil = this.chatgptPaused(due);
       if (pausedUntil) { this.pausedStatus(pausedUntil); return; }
       await this.runPost(due);
+      setTimeout(() => this.tick(), 1000);
     } catch (e) {
       this.log.error(`Tick error: ${e.stack || e.message}`);
     } finally {
@@ -405,6 +410,7 @@ class Engine extends EventEmitter {
     } finally {
       if (page && !keepPage) await this.chrome.closePage(page);
       this.lastRunEnd = Date.now();
+      this.lastRunPostId = id;
       this.setStatus({ phase: this.attention ? 'attention' : (this.running ? 'idle' : 'stopped'), step: this.attention ? this.status.step : '', currentPostId: null });
     }
   }
@@ -468,12 +474,12 @@ class Engine extends EventEmitter {
       // A generated image is kept and only the upload is repeated; only when generation itself keeps failing
       // (no image yet) is the content generated fresh every MAX_ATTEMPTS failures.
       const fresh = post.attempts > 0 && post.attempts % MAX_ATTEMPTS === 0 && !(post.image_path && fs.existsSync(post.image_path));
-      const delayMin = RETRY_DELAY_MIN;
+      const delayMs = retryDelayMs(post.attempts);
       this.store.updatePost(id, {
-        status: 'scheduled', scheduled_at: now + delayMin * 60 * 1000, error: msg,
+        status: 'scheduled', scheduled_at: now + delayMs, error: msg,
         ...(fresh ? { caption: null, image_path: null, caption_key: null, image_hash: null } : {}),
       });
-      log.warn(`Attempt ${post.attempts} failed, retrying in ${delayMin} min${fresh ? ' with new content' : ''}: ${msg}`);
+      log.warn(`Attempt ${post.attempts} failed, retrying ${delayMs ? 'in 1 min' : 'now'}${fresh ? ' with new content' : ''}: ${msg}`);
     }
     return false;
   }
