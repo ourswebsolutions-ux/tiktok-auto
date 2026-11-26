@@ -254,6 +254,8 @@ class Store {
   history(limit = 200) {
     return this.db.prepare(
       'SELECT id, day, scheduled_at, slot_at, published_at, status, step, title, caption, hashtags, sound_title, sound_evidence, error, attempts, image_path FROM posts '
+      // Published posts leave the list (they are only counted in the stats).
+      + 'WHERE status != \'published\' '
       // Latest activity first; empty future slots (not generated yet) at the end.
       + 'ORDER BY CASE WHEN status = \'scheduled\' AND caption IS NULL THEN 1 ELSE 0 END, updated_at DESC LIMIT ?',
     ).all(limit).map(plain);

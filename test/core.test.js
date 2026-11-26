@@ -240,3 +240,15 @@ test('TikTok schedule timezone is read from TikTok and the time converted into i
   const cn = wallClock(instant, 480); // the same instant on a GMT+8 TikTok clock
   assert.deepStrictEqual([cn.d, cn.h, cn.mi], [26, 7, 45]);
 });
+
+test('published posts leave the list and are only counted in the stats', () => {
+  const store = new Store(tmpDb());
+  const day = dayKey();
+  const a = store.createPost(day, Date.now());
+  const b = store.createPost(day, Date.now() + 3600e3);
+  store.updatePost(a, { status: 'published', published_at: Date.now(), caption: 'x' });
+  assert.deepStrictEqual(store.history().map((h) => h.id), [b]);
+  assert.strictEqual(store.stats(day).totalPublished, 1);
+  assert.strictEqual(store.stats(day).todayPublished, 1);
+  store.close();
+});

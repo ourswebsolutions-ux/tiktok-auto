@@ -112,7 +112,8 @@ restart the app continues from the last completed step; a generated image is nev
 - Upload/scheduling failures are retried (1, 2, 5, 10, 15, 15 … minutes) until the post is on TikTok. Only a genuine
   permanent error stops a post (the AI refuses the prompt). Posts of a past day that already have their image are
   published today instead of being dropped.
-- The history shows the latest 5 posts with image previews; *Show all* expands the list.
+- The posting schedule shows the latest 5 waiting / in-progress posts with image previews; *Show all* expands the
+  list. Published posts leave the list and are only counted in the statistics.
 
 ## How the music is chosen
 

@@ -284,8 +284,8 @@ export default function App() {
       </section>
 
       <section className="card">
-        <h2>Publishing history</h2>
-        {state.history.length === 0 ? <p className="empty">Nothing scheduled yet.</p> : (
+        <h2>Posting schedule</h2>
+        {state.history.length === 0 ? <p className="empty">Nothing waiting - published posts are counted above.</p> : (
           <div className="table-wrap">
             <table>
               <thead>
