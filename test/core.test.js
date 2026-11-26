@@ -241,13 +241,17 @@ test('TikTok schedule timezone is read from TikTok and the time converted into i
   assert.deepStrictEqual([cn.d, cn.h, cn.mi], [26, 7, 45]);
 });
 
-test('published posts leave the list and are only counted in the stats', () => {
+test('published and TikTok-scheduled posts leave the list and are only counted in the stats', () => {
   const store = new Store(tmpDb());
   const day = dayKey();
   const a = store.createPost(day, Date.now());
   const b = store.createPost(day, Date.now() + 3600e3);
+  const c = store.createPost(day, Date.now() + 7200e3);
   store.updatePost(a, { status: 'published', published_at: Date.now(), caption: 'x' });
+  store.updatePost(c, { status: 'tiktok_scheduled', published_at: Date.now() + 7200e3, caption: 'y' });
   assert.deepStrictEqual(store.history().map((h) => h.id), [b]);
+  assert.strictEqual(store.stats(day).tiktokScheduled, 1);
+  assert.strictEqual(store.stats(day).pending, 1, 'pending = still to be uploaded');
   assert.strictEqual(store.stats(day).totalPublished, 1);
   assert.strictEqual(store.stats(day).todayPublished, 1);
   store.close();

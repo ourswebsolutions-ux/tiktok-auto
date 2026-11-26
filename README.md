@@ -114,7 +114,8 @@ restart the app continues from the last completed step; a generated image is nev
   permanent error stops a post (the AI refuses the prompt). Posts of a past day that already have their image are
   published today instead of being dropped.
 - The posting schedule shows the latest 5 waiting / in-progress posts with image previews; *Show all* expands the
-  list. Published posts leave the list and are only counted in the statistics.
+  list. Published posts and posts already scheduled on TikTok leave the list and are only counted in the statistics
+  (*Total published*, *Published today*, *Scheduled on TikTok*; *Pending* = still to be uploaded).
 
 ## How the music is chosen
 

@@ -244,6 +244,7 @@ export default function App() {
         </div>
         <div className="card stat"><span className="num">{state.stats.totalPublished}</span><span className="lbl">Total published</span></div>
         <div className="card stat"><span className="num">{state.stats.todayPublished}</span><span className="lbl">Published today</span></div>
+        <div className="card stat"><span className="num">{state.stats.tiktokScheduled}</span><span className="lbl">Scheduled on TikTok</span></div>
         <div className="card stat"><span className="num">{state.stats.pending}</span><span className="lbl">Pending</span></div>
       </section>
 

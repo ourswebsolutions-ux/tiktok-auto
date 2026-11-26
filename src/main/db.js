@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS cache (
 // Statuses
 // 'tiktok_scheduled' = uploaded and scheduled with TikTok's own scheduler; published_at holds the TikTok post time.
 const ACTIVE_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified', 'published', 'tiktok_scheduled'];
-const PENDING_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified', 'tiktok_scheduled'];
+// Pending = still to be uploaded. Posts already scheduled on TikTok are counted separately.
+const PENDING_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified'];
 const IN_PROGRESS_STATUSES = ['generating', 'uploading', 'posting'];
 
 const POST_FIELDS = new Set([
@@ -254,8 +255,8 @@ class Store {
   history(limit = 200) {
     return this.db.prepare(
       'SELECT id, day, scheduled_at, slot_at, published_at, status, step, title, caption, hashtags, sound_title, sound_evidence, error, attempts, image_path FROM posts '
-      // Published posts leave the list (they are only counted in the stats).
-      + 'WHERE status != \'published\' '
+      // Published posts and posts already scheduled on TikTok leave the list (they are only counted in the stats).
+      + 'WHERE status NOT IN (\'published\', \'tiktok_scheduled\') '
       // Latest activity first; empty future slots (not generated yet) at the end.
       + 'ORDER BY CASE WHEN status = \'scheduled\' AND caption IS NULL THEN 1 ELSE 0 END, updated_at DESC LIMIT ?',
     ).all(limit).map(plain);
@@ -266,7 +267,8 @@ class Store {
     const todayCount = this.db.prepare('SELECT COUNT(*) AS c FROM posts WHERE status = \'published\' AND day = ?').get(today).c;
     const pending = this.db.prepare(`SELECT COUNT(*) AS c FROM posts WHERE status IN (${placeholders(PENDING_STATUSES)})`)
       .get(...PENDING_STATUSES).c;
-    return { totalPublished: Number(total), todayPublished: Number(todayCount), pending: Number(pending) };
+    const onTikTok = this.db.prepare('SELECT COUNT(*) AS c FROM posts WHERE status = \'tiktok_scheduled\'').get().c;
+    return { totalPublished: Number(total), todayPublished: Number(todayCount), pending: Number(pending), tiktokScheduled: Number(onTikTok) };
   }
 
   // Content of recent posts, used to keep ChatGPT from repeating itself.
