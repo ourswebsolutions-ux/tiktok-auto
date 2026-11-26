@@ -61,7 +61,7 @@ const PENDING_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'un
 const IN_PROGRESS_STATUSES = ['generating', 'uploading', 'posting'];
 
 const POST_FIELDS = new Set([
-  'day', 'scheduled_at', 'status', 'step', 'attempts', 'verify_checks', 'prompt_id', 'prompt_text', 'idea',
+  'day', 'scheduled_at', 'slot_at', 'status', 'step', 'attempts', 'verify_checks', 'prompt_id', 'prompt_text', 'idea',
   'image_prompt', 'caption', 'hashtags', 'music_keywords', 'title', 'topic_keywords', 'image_path', 'image_hash',
   'sound_title', 'sound_evidence', 'caption_key', 'error', 'published_at',
 ]);
@@ -86,6 +86,13 @@ class Store {
     this.db = openSqlite(file);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;');
     this.db.exec(SCHEMA);
+    // Migration: slot_at = the post's intended (calculated) time. scheduled_at is also used as "next attempt" time
+    // for retries, so the intended time must be kept separately (TikTok-based scheduling uses it).
+    const cols = this.db.prepare('PRAGMA table_info(posts)').all().map((c) => c.name);
+    if (!cols.includes('slot_at')) {
+      this.db.exec('ALTER TABLE posts ADD COLUMN slot_at INTEGER');
+      this.db.exec('UPDATE posts SET slot_at = scheduled_at WHERE slot_at IS NULL');
+    }
   }
 
   close() { try { this.db.close(); } catch (_) { /* ignore */ } }
@@ -150,8 +157,8 @@ class Store {
   // ---------- posts ----------
   createPost(day, scheduledAt) {
     const now = Date.now();
-    const r = this.db.prepare('INSERT INTO posts(day, scheduled_at, status, created_at, updated_at) VALUES(?, ?, \'scheduled\', ?, ?)')
-      .run(day, scheduledAt, now, now);
+    const r = this.db.prepare('INSERT INTO posts(day, scheduled_at, slot_at, status, created_at, updated_at) VALUES(?, ?, ?, \'scheduled\', ?, ?)')
+      .run(day, scheduledAt, scheduledAt, now, now);
     return Number(r.lastInsertRowid);
   }
 
@@ -186,18 +193,38 @@ class Store {
     ).get(now));
   }
 
-  // TikTok-based scheduling: upload upcoming posts ahead of time, one by one. Posts waiting for a retry
-  // delay (error set, scheduled_at in the future) are skipped until their retry time.
-  nextTikTokCandidate(now) {
-    return plain(this.db.prepare(
-      'SELECT * FROM posts WHERE status = \'scheduled\' AND (scheduled_at <= ? OR (attempts = 0 AND error IS NULL)) ORDER BY scheduled_at ASC LIMIT 1',
-    ).get(now));
+  // TikTok-based scheduling works strictly one post at a time: a post that failed (error set) is retried until it is
+  // scheduled on TikTok, and no other post is uploaded meanwhile. Returns { post, ready } or null.
+  tiktokQueueHead(now) {
+    const retrying = plain(this.db.prepare(
+      'SELECT * FROM posts WHERE status = \'scheduled\' AND error IS NOT NULL ORDER BY COALESCE(slot_at, scheduled_at) ASC LIMIT 1',
+    ).get());
+    if (retrying) return { post: retrying, ready: retrying.scheduled_at <= now };
+    const next = plain(this.db.prepare(
+      'SELECT * FROM posts WHERE status = \'scheduled\' ORDER BY COALESCE(slot_at, scheduled_at) ASC LIMIT 1',
+    ).get());
+    return next ? { post: next, ready: true } : null;
   }
 
-  // Posts scheduled on TikTok whose time has passed are live on TikTok now.
-  promoteDueTikTokScheduled(now) {
-    return this.db.prepare('UPDATE posts SET status = \'published\', updated_at = ? WHERE status = \'tiktok_scheduled\' AND published_at <= ?')
-      .run(now, now).changes;
+  // Next not-yet-generated slot at or after `after` (used to reuse the content of an unconfirmed post).
+  nextEmptySlot(after, excludeId) {
+    return plain(this.db.prepare(
+      'SELECT * FROM posts WHERE status = \'scheduled\' AND caption IS NULL AND id != ? AND COALESCE(slot_at, scheduled_at) >= ? ORDER BY COALESCE(slot_at, scheduled_at) ASC LIMIT 1',
+    ).get(excludeId || 0, after));
+  }
+
+  // Posts scheduled on TikTok whose time has passed and whose live check is due.
+  dueTikTokLiveCheck(now, delayMs) {
+    return plain(this.db.prepare(
+      'SELECT * FROM posts WHERE status = \'tiktok_scheduled\' AND published_at + ? <= ? AND scheduled_at <= ? ORDER BY published_at ASC LIMIT 1',
+    ).get(delayMs, now, now));
+  }
+
+  // Older posts that ended as "could not confirm" but still have their content: candidates for reuse.
+  unconfirmedFailedWithContent() {
+    return plain(this.db.prepare(
+      'SELECT * FROM posts WHERE status = \'failed\' AND caption IS NOT NULL AND image_path IS NOT NULL AND error LIKE \'Could not confirm on TikTok%\' ORDER BY id ASC LIMIT 1',
+    ).get());
   }
 
   nextScheduledPost() {
@@ -214,15 +241,22 @@ class Store {
   }
 
   markOldScheduledMissed(today) {
+    const now = Date.now();
+    // Slots of past days that were never generated are dropped ("missed")...
     this.db.prepare(
-      'UPDATE posts SET status = \'missed\', error = \'Computer was off/asleep or automation stopped during this day\', updated_at = ? WHERE day < ? AND status = \'scheduled\'',
-    ).run(Date.now(), today);
+      'UPDATE posts SET status = \'missed\', error = \'Computer was off/asleep or automation stopped during this day\', updated_at = ? WHERE day < ? AND status = \'scheduled\' AND (caption IS NULL OR image_path IS NULL)',
+    ).run(now, today);
+    // ...but a post whose image + caption already exist is never left behind: it becomes one of today's posts.
+    this.db.prepare(
+      'UPDATE posts SET day = ?, updated_at = ? WHERE day < ? AND status = \'scheduled\' AND caption IS NOT NULL AND image_path IS NOT NULL',
+    ).run(today, now, today);
   }
 
   history(limit = 200) {
     return this.db.prepare(
-      'SELECT id, day, scheduled_at, published_at, status, step, title, caption, hashtags, sound_title, sound_evidence, error, attempts, image_path FROM posts '
-      + 'ORDER BY COALESCE(published_at, scheduled_at) DESC LIMIT ?',
+      'SELECT id, day, scheduled_at, slot_at, published_at, status, step, title, caption, hashtags, sound_title, sound_evidence, error, attempts, image_path FROM posts '
+      // Latest activity first; empty future slots (not generated yet) at the end.
+      + 'ORDER BY CASE WHEN status = \'scheduled\' AND caption IS NULL THEN 1 ELSE 0 END, updated_at DESC LIMIT ?',
     ).all(limit).map(plain);
   }
 

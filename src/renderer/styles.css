@@ -77,7 +77,7 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); }
 td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .nowrap { white-space: nowrap; }
-.caption { display: flex; flex-direction: column; gap: 3px; max-width: 620px; }
+.caption .cap { display: flex; flex-direction: column; gap: 3px; max-width: 620px; }
 .caption .tags { color: #2563eb; }
 .caption .sound { color: var(--muted); }
 .caption .error { color: #c0262d; font-size: 12px; word-break: break-word; }
@@ -98,3 +98,7 @@ td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top
 .segmented button.on { background: var(--accent); color: #fff; font-weight: 600; }
 .badge.tiktok_scheduled { background: #fff0d6; color: #8a5300; }
 .mode-label { min-width: 104px; }
+.thumb { width: 42px; height: 75px; object-fit: cover; border-radius: 6px; display: block; background: var(--line); }
+.empty-thumb { display: block; }
+.prompt-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap !important; max-width: 760px; color: var(--muted); }
+.link.more { margin-top: 10px; font-size: 13px; }

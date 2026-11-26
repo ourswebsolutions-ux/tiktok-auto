@@ -25,7 +25,7 @@ function statusLine(state) {
   if (s.phase === 'working' || s.phase === 'connecting') return { tone: 'busy', text: s.step || 'Working...' };
   if (s.phase === 'stopping') return { tone: 'busy', text: 'Stopping...' };
   if (state.running) {
-    if (s.step && /limit reached|keep a gap/i.test(s.step)) return { tone: 'warn', text: s.step };
+    if (s.step && /limit reached|keep a gap|retrying/i.test(s.step)) return { tone: 'warn', text: s.step };
     if (state.schedulingMode === 'tiktok') {
       return { tone: 'ok', text: s.nextPostAt ? `Running (TikTok scheduling) - next upload for ${fmtTime(s.nextPostAt)}` : 'Running (TikTok scheduling) - today\'s posts are scheduled on TikTok' };
     }
@@ -47,6 +47,15 @@ function updateText(appInfo) {
   return v;
 }
 
+// Local image file -> URL the dashboard can display (Windows and Linux paths).
+const fileUrl = (p) => encodeURI(`file://${p.startsWith('/') ? '' : '/'}${p.replace(/\\/g, '/')}`).replace(/#/g, '%23');
+
+// Errors are shown short (internal details, screenshot paths stay in the tooltip and logs).
+const shortError = (e) => {
+  const clean = String(e).replace(/\s*\[screenshot:[^\]]*\]/, '').replace(/\s*\(waiting for [^)]*\)/, '');
+  return clean.length > 140 ? `${clean.slice(0, 140)}…` : clean;
+};
+
 function PromptItem({ prompt, onSave, onDelete }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(prompt.text);
@@ -64,7 +73,7 @@ function PromptItem({ prompt, onSave, onDelete }) {
   }
   return (
     <li className="prompt">
-      <p>{prompt.text}</p>
+      <p className="prompt-text" title="Click Edit to see or change the full prompt">{prompt.text}</p>
       <div className="row-actions">
         <button className="btn small" onClick={() => setEditing(true)}>Edit</button>
         <button className="btn small danger" onClick={() => { if (confirm('Delete this prompt?')) onDelete(prompt.id); }}>Delete</button>
@@ -79,6 +88,7 @@ export default function App() {
   const [qty, setQty] = useState('');
   const [notice, setNotice] = useState(null); // { tone, title, text }
   const [checking, setChecking] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   const refresh = useCallback(async () => {
     const s = await api.getState();
@@ -279,28 +289,34 @@ export default function App() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Date</th><th>Time</th><th>Caption</th><th>Status</th></tr>
+                <tr><th>Date</th><th>Time</th><th>Image</th><th>Caption</th><th>Status</th></tr>
               </thead>
               <tbody>
-                {state.history.map((h) => {
-                  const t = h.published_at || h.scheduled_at;
+                {(showAll ? state.history : state.history.slice(0, 5)).map((h) => {
+                  const t = h.published_at || h.slot_at || h.scheduled_at;
                   return (
                     <tr key={h.id}>
                       <td className="nowrap">{fmtDate(t)}</td>
                       <td className="nowrap">{fmtTime(t)}</td>
-                      <td className="caption">
+                      <td>{h.image_path ? <img className="thumb" src={fileUrl(h.image_path)} alt="" loading="lazy" /> : <span className="thumb empty-thumb" />}</td>
+                      <td className="caption"><div className="cap">
                         {h.title && <strong>{h.title}</strong>}
                         <span>{h.caption || <em className="muted">Content is generated at posting time</em>}</span>
                         {h.hashtags.length > 0 && <span className="tags">{h.hashtags.join(' ')}</span>}
                         {h.sound_title && <span className="sound" title={h.sound_evidence || ''}>♪ {h.sound_title}</span>}
-                        {h.error && h.status !== 'published' && <span className="error">{h.error}</span>}
-                      </td>
+                        {h.error && h.status !== 'published' && <span className="error" title={h.error}>{shortError(h.error)}</span>}
+                      </div></td>
                       <td><span className={`badge ${h.status}`}>{STATUS_LABELS[h.status] || h.status}</span></td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+            {state.history.length > 5 && (
+              <button className="link more" onClick={() => setShowAll((v) => !v)}>
+                {showAll ? 'Show less' : `Show all (${state.history.length})`}
+              </button>
+            )}
           </div>
         )}
       </section>

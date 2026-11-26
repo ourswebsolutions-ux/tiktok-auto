@@ -28,8 +28,14 @@ const RETRY_DELAYS_MIN = [1, 2, 5, 10, 15];
 // TikTok-based mode keeps this many days scheduled ahead (TikTok allows scheduling up to 10 days ahead).
 const TIKTOK_DAYS_AHEAD = 10;
 const VERIFY_INTERVAL_MS = 10 * 60 * 1000;
-const MAX_VERIFY_CHECKS = 12; // ~2 hours
 const TIKTOK_UPLOAD_PAUSE_MS = 60 * 1000; // TikTok-based mode: short pause between uploads
+// TikTok-scheduled posts are checked in the Posts list once they should be live; if still missing after
+// LIVE_MAX_CHECKS checks (~1 hour) the post is uploaded again / its content reused for the next free slot.
+const LIVE_CHECK_DELAY_MS = 15 * 60 * 1000;
+// Unconfirmed upload: checked this many times, this far apart, then uploaded again (no long confirmation loops).
+const CONFIRM_CHECKS = 2;
+const CONFIRM_INTERVAL_MS = 3 * 60 * 1000;
+const LIVE_MAX_CHECKS = 6;
 const BROWSER_GONE_RE = /Target (page, context or browser )?(has been )?closed|Browser has been closed|browser has disconnected|has been disconnected|Connection closed|WebSocket is not open/i;
 
 class Engine extends EventEmitter {
@@ -226,16 +232,32 @@ class Engine extends EventEmitter {
       const toVerify = this.store.postsWithStatus(['unverified']).find((p) => p.scheduled_at <= now);
       if (toVerify) { await this.verifyPost(toVerify); return; }
 
-      if (this.store.promoteDueTikTokScheduled(now)) this.emit('change');
+      // Posts scheduled on TikTok: once their time has passed, confirm they are live.
+      const live = this.store.dueTikTokLiveCheck(now, LIVE_CHECK_DELAY_MS);
+      if (live) { await this.verifyLive(live); return; }
+      // Earlier posts that ended unconfirmed still have their image + caption: bring them back (uploaded again).
+      const oldFailed = this.store.unconfirmedFailedWithContent();
+      if (oldFailed) this.recoverPost(oldFailed, 'Earlier post was never confirmed on TikTok');
 
       if (this.schedulingMode() === 'tiktok') {
         // TikTok-based: upload the upcoming posts one by one right away; TikTok publishes them at their times.
-        const next = this.store.nextTikTokCandidate(now);
-        if (!next) {
+        // Strictly one at a time: nothing else is uploaded until the current post is scheduled on TikTok.
+        const pendingConfirm = this.store.postsWithStatus(['unverified'])[0];
+        if (pendingConfirm) {
+          this.setStatus({ phase: 'idle', currentPostId: null, step: `Retrying: confirming post ${pendingConfirm.id} on TikTok before the next upload` });
+          return;
+        }
+        const head = this.store.tiktokQueueHead(now);
+        if (!head) {
           const later = this.store.nextScheduledPost();
           this.setStatus({ phase: 'idle', step: '', currentPostId: null, nextPostAt: later ? later.scheduled_at : null });
           return;
         }
+        if (!head.ready) {
+          this.setStatus({ phase: 'idle', currentPostId: null, step: `Retrying post ${head.post.id} at ${new Date(head.post.scheduled_at).toTimeString().slice(0, 5)} - next uploads wait until it is scheduled on TikTok` });
+          return;
+        }
+        const next = head.post;
         if (now - this.lastRunEnd < TIKTOK_UPLOAD_PAUSE_MS) return; // short pause between uploads
         const pausedUntil = this.chatgptPaused(next);
         if (pausedUntil) { this.pausedStatus(pausedUntil); return; }
@@ -352,7 +374,11 @@ class Engine extends EventEmitter {
       // 2) Daily cap guard (never more than the target per day).
       const today = this.store.postsForDay(p.day).filter((x) => ['posting', 'unverified', 'published', 'tiktok_scheduled'].includes(x.status)).length;
       if (today >= this.dailyQuantity()) {
-        this.store.updatePost(id, { status: 'cancelled', step: '', error: 'Daily target already reached' });
+        // Never discard a generated image: it becomes a post for the same time tomorrow.
+        const tomorrow = (p.slot_at || p.scheduled_at) + 24 * 3600e3;
+        const nd = new Date(tomorrow);
+        this.store.updatePost(id, { status: 'scheduled', day: dayKey(nd), slot_at: tomorrow, scheduled_at: tomorrow, step: 'Daily target reached - moved to tomorrow', error: null });
+        log.info('Daily target already reached - post (with its image) moved to tomorrow.');
         return;
       }
 
@@ -361,7 +387,9 @@ class Engine extends EventEmitter {
       p = this.store.getPost(id);
       const recentSounds = this.store.recentContent(10).map((r) => r.sound_title).filter(Boolean);
       // TikTok-based scheduling: same calculated time, adjusted to TikTok's rules (>= 20 min ahead, 5-minute steps).
-      const scheduleAt = this.schedulingMode() === 'tiktok' ? tiktok.tiktokScheduleTime(p.scheduled_at) : null;
+      const slot = p.slot_at || p.scheduled_at;
+      const scheduleAt = this.schedulingMode() === 'tiktok' && slot > Date.now() ? tiktok.tiktokScheduleTime(slot) : null;
+      if (this.schedulingMode() === 'tiktok' && !scheduleAt) log.info('Original time has passed - publishing now instead of scheduling in the past.');
       const res = await tiktok.publishPhotoPost(page, p, {
         log,
         shouldAbort: () => this.shouldAbort(),
@@ -381,14 +409,19 @@ class Engine extends EventEmitter {
         this.store.updatePost(id, { status: 'published', step: res.signal, error: null });
         log.info(`PUBLISHED (${res.signal})`);
         this.notify('Post published on TikTok', p.title || p.caption);
+      } else if (res.unverified && scheduleAt && res.tiktokConfirmed) {
+        // TikTok confirmed the scheduling; scheduled posts may only appear in the Posts list once live,
+        // so it is checked again after its time (verifyLive).
+        this.store.updatePost(id, { status: 'tiktok_scheduled', verify_checks: 0, error: null, step: `TikTok confirmed the schedule (${res.scheduledFor}); checked again when it goes live` });
+        log.info(`SCHEDULED ON TIKTOK for ${new Date(scheduleAt).toLocaleString()} (confirmed by TikTok)`);
       } else if (res.unverified) {
-        this.store.updatePost(id, { status: 'unverified', verify_checks: 0, scheduled_at: Date.now() + VERIFY_INTERVAL_MS, error: res.message, step: 'Waiting to confirm on TikTok' });
+        this.store.updatePost(id, { status: 'unverified', verify_checks: 0, scheduled_at: Date.now() + CONFIRM_INTERVAL_MS, error: res.message, step: 'Waiting to confirm on TikTok' });
         log.warn(res.message);
       } else {
         // TikTok reported a failure after clicking Post. Still verify on the Posts list (a couple of checks)
         // before the slot is released, so a misleading error can never cause a duplicate post.
         this.store.updatePost(id, {
-          status: 'unverified', verify_checks: MAX_VERIFY_CHECKS - 2, scheduled_at: Date.now() + 3 * 60 * 1000, error: res.message, step: 'TikTok reported a problem - double-checking',
+          status: 'unverified', verify_checks: 0, scheduled_at: Date.now() + CONFIRM_INTERVAL_MS, error: res.message, step: 'TikTok reported a problem - double-checking',
         });
         log.warn(res.message);
       }
@@ -450,14 +483,23 @@ class Engine extends EventEmitter {
       this.notify(`${this.ai().name} image limit reached`, `Automation continues automatically at ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}.`);
       return false;
     }
-    if (post.attempts >= MAX_ATTEMPTS) {
+    // Genuine permanent error: the AI refuses this prompt - retrying the same prompt cannot succeed.
+    const permanent = /refused to create the image/i.test(e.message);
+    if (permanent) {
       this.store.updatePost(id, { status: 'failed', error: msg, step: '' });
       log.error(`FAILED after ${post.attempts} attempts: ${msg}`);
       this.notify('TikTok post failed', msg.slice(0, 180));
     } else {
-      const delayMin = RETRY_DELAYS_MIN[Math.min(post.attempts, RETRY_DELAYS_MIN.length) - 1] || 1;
-      this.store.updatePost(id, { status: 'scheduled', scheduled_at: now + delayMin * 60 * 1000, error: msg });
-      log.warn(`Attempt ${post.attempts} failed, retrying in ${delayMin} min: ${msg}`);
+      // Recoverable failures are retried until the post is on TikTok (TikTok mode: other uploads wait meanwhile).
+      // A generated image is kept and only the upload is repeated; only when generation itself keeps failing
+      // (no image yet) is the content generated fresh every MAX_ATTEMPTS failures.
+      const fresh = post.attempts > 0 && post.attempts % MAX_ATTEMPTS === 0 && !(post.image_path && fs.existsSync(post.image_path));
+      const delayMin = RETRY_DELAYS_MIN[Math.min(post.attempts, RETRY_DELAYS_MIN.length) - 1] || RETRY_DELAYS_MIN[RETRY_DELAYS_MIN.length - 1];
+      this.store.updatePost(id, {
+        status: 'scheduled', scheduled_at: now + delayMin * 60 * 1000, error: msg,
+        ...(fresh ? { caption: null, image_path: null, caption_key: null, image_hash: null } : {}),
+      });
+      log.warn(`Attempt ${post.attempts} failed, retrying in ${delayMin} min${fresh ? ' with new content' : ''}: ${msg}`);
     }
     return false;
   }
@@ -477,11 +519,53 @@ class Engine extends EventEmitter {
         this.store.updatePost(id, { status: 'published', published_at: post.published_at || post.updated_at, error: null, step: 'Confirmed in TikTok Posts list' });
         this.log.info(`[post ${id}] Confirmed as published.`);
         this.notify('Post published on TikTok', post.title || post.caption || '');
-      } else if (scheduledLater) {
-        // TikTok may only list a scheduled post once it is live: keep checking without using up the check limit.
-        this.store.updatePost(id, { scheduled_at: Math.max(Date.now() + VERIFY_INTERVAL_MS, post.published_at + 5 * 60 * 1000) });
-      } else if (post.verify_checks + 1 >= MAX_VERIFY_CHECKS) {
-        this.store.updatePost(id, { status: 'failed', error: 'Could not confirm on TikTok after 2 hours - please check your TikTok profile', step: '' });
+      } else if (post.verify_checks + 1 >= CONFIRM_CHECKS) {
+        // Not on TikTok after the checks: upload again (same image + caption). The checks before this prevent
+        // a duplicate when TikTok was only slow to list the post.
+        this.recoverPost(post, 'Not found on TikTok');
+      } else {
+        this.store.updatePost(id, { verify_checks: post.verify_checks + 1, scheduled_at: Date.now() + CONFIRM_INTERVAL_MS });
+      }
+    } catch (e) {
+      if (e instanceof NeedsHumanError) {
+        this.attention = { message: e.message, kind: /not logged in/i.test(e.message) ? 'login' : 'challenge', page: e.page || page };
+        this.setStatus({ phase: 'attention', message: e.message });
+        this.notify('Action needed in Chrome', e.message);
+        page = null;
+      } else {
+        this.log.warn(`[post ${id}] Verification check failed: ${e.message.split('\n')[0]}`);
+        this.store.updatePost(id, { verify_checks: post.verify_checks + 1, scheduled_at: Date.now() + VERIFY_INTERVAL_MS });
+      }
+    } finally {
+      if (page) await this.chrome.closePage(page);
+      this.setStatus({ phase: this.attention ? 'attention' : 'idle', currentPostId: null, step: this.attention ? this.status.step : '' });
+    }
+  }
+
+  // Recovery for a post whose image/caption exist but which is not (confirmed) on TikTok: upload it again with the
+  // same content - nothing is regenerated. runPost then schedules it for its original time if that is still ahead,
+  // or publishes it immediately if the time has passed. It goes to the front of the queue.
+  recoverPost(post, reason) {
+    const slot = post.slot_at || post.scheduled_at;
+    const fields = { status: 'scheduled', scheduled_at: Date.now(), verify_checks: 0, error: `${reason} - uploading again`, step: 'Uploading again to TikTok' };
+    if (slot <= Date.now()) fields.day = dayKey(); // time passed: it becomes one of today's posts (published now)
+    this.store.updatePost(post.id, fields);
+    this.log.warn(`[post ${post.id}] ${reason} - uploading it to TikTok again (${slot > Date.now() ? 'scheduled for its original time' : 'published now, its time has passed'}).`);
+    this.emit('change');
+  }
+
+  // A post scheduled on TikTok should be live after its time: confirm it in the Posts list.
+  async verifyLive(post) {
+    const id = post.id;
+    this.setStatus({ phase: 'working', step: `Checking that post ${id} is live on TikTok`, currentPostId: id });
+    let page;
+    try {
+      page = await this.chrome.newPage();
+      if (await tiktok.findInPostsList(page, { title: post.title, caption: post.caption })) {
+        this.store.updatePost(id, { status: 'published', error: null, step: 'Live on TikTok (found in Posts list)' });
+        this.log.info(`[post ${id}] Live on TikTok - published.`);
+      } else if (post.verify_checks + 1 >= LIVE_MAX_CHECKS) {
+        this.recoverPost({ ...post, slot_at: Date.now() }, 'Not live on TikTok 1 hour after its time');
       } else {
         this.store.updatePost(id, { verify_checks: post.verify_checks + 1, scheduled_at: Date.now() + VERIFY_INTERVAL_MS });
       }
@@ -492,7 +576,6 @@ class Engine extends EventEmitter {
         this.notify('Action needed in Chrome', e.message);
         page = null;
       } else {
-        this.log.warn(`[post ${id}] Verification check failed: ${e.message.split('\n')[0]}`);
         this.store.updatePost(id, { verify_checks: post.verify_checks + 1, scheduled_at: Date.now() + VERIFY_INTERVAL_MS });
       }
     } finally {

@@ -113,22 +113,71 @@ test('similarity helper', () => {
   assert.ok(jaccard('ocean waves at night', 'city skyline at noon') < 0.2);
 });
 
-test('TikTok-based scheduling: upload order, retry delay respected, promotion to published', () => {
+test('TikTok-based queue: earliest slot first, strictly one post at a time while a post is retrying', () => {
   const store = new Store(tmpDb());
   const day = dayKey();
   const now = Date.now();
   const later = store.createPost(day, now + 5 * 3600e3);
   const sooner = store.createPost(day, now + 2 * 3600e3);
-  const retrying = store.createPost(day, now + 30 * 60e3);
-  store.updatePost(retrying, { attempts: 1, error: 'temporary failure' });
-  assert.strictEqual(store.nextTikTokCandidate(now).id, sooner, 'upcoming posts are uploaded ahead of time, earliest first');
+  assert.strictEqual(store.tiktokQueueHead(now).post.id, sooner, 'earliest calculated time first');
+  store.updatePost(later, { attempts: 1, error: 'upload failed', scheduled_at: now + 5 * 60e3 });
+  const head = store.tiktokQueueHead(now);
+  assert.strictEqual(head.post.id, later, 'the failing post stays at the front');
+  assert.strictEqual(head.ready, false, 'other uploads wait until its retry time');
+  assert.strictEqual(store.tiktokQueueHead(now + 6 * 60e3).ready, true);
+  assert.strictEqual(store.getPost(later).slot_at, now + 5 * 3600e3, 'a retry keeps the original posting time');
   store.updatePost(sooner, { status: 'tiktok_scheduled', published_at: now + 2 * 3600e3, caption_key: 'a' });
-  assert.strictEqual(store.nextTikTokCandidate(now).id, later, 'a post waiting for its retry time is skipped');
-  assert.strictEqual(store.stats(day).pending, 3);
-  assert.strictEqual(store.promoteDueTikTokScheduled(now + 3 * 3600e3), 1);
-  assert.strictEqual(store.getPost(sooner).status, 'published');
   store.updatePost(later, { caption_key: 'a' });
   assert.throws(() => store.updatePost(later, { status: 'tiktok_scheduled' }), /UNIQUE/, 'same caption cannot be scheduled twice');
+  store.close();
+});
+
+test('recovery: generated posts are never left behind', () => {
+  const { Engine } = require('../src/main/engine');
+  const store = new Store(tmpDb());
+  const log = { info() {}, warn() {}, error() {} };
+  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: {}, log });
+  const now = Date.now();
+  // not confirmed, original time still ahead -> uploaded again for that time
+  const future = store.createPost(dayKey(), now + 3 * 3600e3);
+  store.updatePost(future, { status: 'unverified', caption: 'c1', image_path: __filename });
+  engine.recoverPost(store.getPost(future), 'Not found on TikTok');
+  let p = store.getPost(future);
+  assert.strictEqual(p.status, 'scheduled');
+  assert.strictEqual(p.slot_at, now + 3 * 3600e3);
+  assert.ok(p.error.includes('uploading again'));
+  // original time passed -> becomes today's post (published immediately)
+  const yesterday = dayKey(new Date(now - 86400e3));
+  const past = store.createPost(yesterday, now - 86400e3);
+  store.updatePost(past, { status: 'failed', caption: 'c2', image_path: __filename, error: 'Could not confirm on TikTok after 2 hours' });
+  engine.recoverPost(store.getPost(past), 'Earlier post was never confirmed on TikTok');
+  assert.strictEqual(store.getPost(past).day, dayKey());
+  // past-day slots: generated ones move to today, empty ones are dropped
+  const genOld = store.createPost(yesterday, now - 80000e3);
+  store.updatePost(genOld, { caption: 'c3', image_path: __filename });
+  const emptyOld = store.createPost(yesterday, now - 80000e3);
+  store.markOldScheduledMissed(dayKey());
+  assert.strictEqual(store.getPost(genOld).status, 'scheduled');
+  assert.strictEqual(store.getPost(genOld).day, dayKey());
+  assert.strictEqual(store.getPost(emptyOld).status, 'missed');
+  store.close();
+});
+
+test('failures: recoverable errors keep retrying (image kept), AI refusal is permanent', async () => {
+  const { Engine } = require('../src/main/engine');
+  const { UiError } = require('../src/main/automation/util');
+  const store = new Store(tmpDb());
+  const log = { info() {}, warn() {}, error() {} };
+  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: { screenshots: os.tmpdir() }, log });
+  const id = store.createPost(dayKey(), Date.now());
+  store.updatePost(id, { status: 'uploading', attempts: 12, caption: 'c', image_path: __filename });
+  await engine.handleError(id, new UiError('Could not click TikTok "Post" button'), null, log);
+  let p = store.getPost(id);
+  assert.strictEqual(p.status, 'scheduled', 'still retried after many attempts');
+  assert.strictEqual(p.image_path, __filename, 'generated image is kept, only the upload is repeated');
+  store.updatePost(id, { status: 'generating', attempts: 1 });
+  await engine.handleError(id, new UiError('ChatGPT refused to create the image: policy'), null, log);
+  assert.strictEqual(store.getPost(id).status, 'failed');
   store.close();
 });
 

@@ -513,7 +513,7 @@ async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, be
   }
   const when = scheduledFor ? ` (scheduled on TikTok for ${scheduledFor})` : '';
   if (listed) return { published: true, signal: `${res.signal || 'posted'}; found in TikTok Posts list${when}`, sound, scheduledFor };
-  return { published: false, unverified: true, message: res.ok ? `TikTok showed "${res.signal}" but the post is not in the Posts list yet${when}` : `No confirmation from TikTok after clicking ${scheduleAt ? 'Schedule' : 'Post'}`, sound, scheduledFor };
+  return { published: false, unverified: true, tiktokConfirmed: !!res.ok, message: res.ok ? `TikTok showed "${res.signal}" but the post is not in the Posts list yet${when}` : `No confirmation from TikTok after clicking ${scheduleAt ? 'Schedule' : 'Post'}`, sound, scheduledFor };
 }
 
 module.exports = { checkTikTok, publishPhotoPost, findInPostsList, rankSounds, collectMusic, tiktokScheduleTime, tzOffsetMinutes, wallClock, MIN_SOUND_USES };

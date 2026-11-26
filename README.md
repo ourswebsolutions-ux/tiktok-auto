@@ -99,6 +99,21 @@ posting times are the same in both modes, and automation runs continuously until
 - A failed post or upload is retried automatically after 1, 2, 5, 10 and 15 minutes (up to 6 attempts); other posts
   keep going meanwhile. If a post still fails, a replacement post is scheduled for that day.
 
+## Every generated post reaches TikTok
+
+Each post is tracked step by step (image + caption → upload → scheduled/published → live). After an error or a
+restart the app continues from the last completed step; a generated image is never generated again or left behind.
+
+- Not confirmed by TikTok after 2 short checks (3 minutes apart): the same post is uploaded again – scheduled for its
+  original time if that is still ahead, otherwise published immediately. No long "Confirming" loops.
+- TikTok-Based mode: if TikTok confirms the scheduling, the post is "Scheduled on TikTok" and is checked again after
+  its time; if it is not live an hour later it is uploaded again. Uploads are strictly one at a time – the next post
+  waits until the current one is scheduled on TikTok.
+- Upload/scheduling failures are retried (1, 2, 5, 10, 15, 15 … minutes) until the post is on TikTok. Only a genuine
+  permanent error stops a post (the AI refuses the prompt). Posts of a past day that already have their image are
+  published today instead of being dropped.
+- The history shows the latest 5 posts with image previews; *Show all* expands the list.
+
 ## How the music is chosen
 
 TikTok's sound picker loads TikTok's own data for every sound, including **how many videos use it**. The app reads that
