@@ -201,6 +201,11 @@ class Store {
     ).get(now));
   }
 
+  // Claims a post for one image worker; false if another tab took it first (central queue, no duplicate jobs).
+  claimForGeneration(id) {
+    return this.db.prepare('UPDATE posts SET status = \'generating\', updated_at = ? WHERE id = ? AND status = \'scheduled\'').run(Date.now(), id).changes === 1;
+  }
+
   // Upload worker: next post with a ready image whose posting time is <= maxSlot (software-based: now; TikTok-based:
   // inside TikTok's scheduling window). A post waiting for its retry time never blocks the others.
   nextToUpload(now, { maxSlot }) {

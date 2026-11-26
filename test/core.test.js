@@ -299,7 +299,7 @@ test('image generation and TikTok upload run at the same time (one never waits f
   let overlap = false;
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   engine.generateOne = async () => { await wait(300); };
-  engine.uploadOne = async () => { overlap = overlap || engine.workers.gen.busy; await wait(300); };
+  engine.uploadOne = async () => { overlap = overlap || engine.workers['gen-0'].busy; await wait(300); };
   const g = engine.runGenWorker();
   const u = engine.runUploadWorker();
   await Promise.all([g, u]);
@@ -403,6 +403,53 @@ test('export: every generated post is saved with its image, caption, hashtags an
   const data = JSON.parse(fs.readFileSync(path.join(dir, files.find((x) => x.endsWith('.json'))), 'utf8'));
   assert.deepStrictEqual([data.caption, data.hashtags.join(' ')], ['Hello', '#a #b']);
   assert.ok(data.postingDate);
+  store.close();
+});
+
+test('parallel tabs: each tab takes a different post from one central queue, at the same time', async () => {
+  const { Engine } = require('../src/main/engine');
+  const store = new Store(tmpDb());
+  store.addPrompt('p');
+  store.setSetting('daily_quantity', '10');
+  store.setSetting('gen_enabled', '1');
+  const pages = [];
+  const chrome = { isConnected: () => true, closePage: async (p) => { if (p) p.closed = true; }, newPage: async () => { const p = { closed: false, isClosed() { return this.closed; } }; pages.push(p); return p; } };
+  const engine = new Engine({ store, chrome, dirs: {}, log: quietLog });
+  engine.setGenMode('multi', 5);
+  assert.strictEqual(engine.genKeys().length, 5, '5 image workers');
+  const now = Date.now();
+  for (let i = 0; i < 8; i++) store.createPost(dayKey(), now + (i + 1) * 3600e3);
+  const taken = [];
+  let concurrent = 0; let maxConcurrent = 0;
+  engine.generateOne = async (post, key) => {
+    taken.push(post.id);
+    concurrent++; maxConcurrent = Math.max(maxConcurrent, concurrent);
+    await new Promise((r) => setTimeout(r, 200));
+    concurrent--;
+    store.updatePost(post.id, { status: 'ready' });
+  };
+  await Promise.all(engine.genKeys().map((k) => engine.runGenWorker(k)));
+  assert.strictEqual(new Set(taken).size, taken.length, 'no post was given to two tabs');
+  assert.strictEqual(maxConcurrent, 5, 'all 5 tabs worked at the same time');
+  store.setSetting('gen_enabled', '0');
+  await new Promise((r) => setTimeout(r, 800));
+  store.close();
+});
+
+test('generation mode: single <-> multiple switches instantly and is remembered; claims never double-assign', () => {
+  const store = new Store(tmpDb());
+  const engine = makeEngine(store);
+  assert.strictEqual(engine.genKeys().length, 1, 'default: single tab');
+  engine.setGenMode('multi', 7);
+  assert.strictEqual(engine.genKeys().length, 7);
+  engine.setGenMode('multi', 50);
+  assert.strictEqual(engine.genTabs(), 10, 'at most 10 tabs');
+  engine.setGenMode('single');
+  assert.strictEqual(engine.genKeys().length, 1);
+  assert.strictEqual(store.getSetting('gen_tabs'), '10', 'tab count remembered for the next switch to Multiple');
+  const id = store.createPost(dayKey(), Date.now() + 3600e3);
+  assert.strictEqual(store.claimForGeneration(id), true);
+  assert.strictEqual(store.claimForGeneration(id), false, 'a second tab cannot claim the same post');
   store.close();
 });
 

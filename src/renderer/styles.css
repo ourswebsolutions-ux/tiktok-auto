@@ -171,3 +171,12 @@ td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top
 .hero-actions { flex-wrap: wrap; }
 .stat.limit-full .num { color: var(--warn); }
 .stat .bar { margin-top: 8px; }
+
+/* ---------- parallel image tabs ---------- */
+.tabs-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; max-height: 260px; overflow-y: auto; }
+.tabs-list li { display: grid; grid-template-columns: 86px 48px 1fr; gap: 8px; align-items: center; font-size: 12px; }
+.tabs-list .pill { text-align: center; }
+.tab-name { font-weight: 600; }
+.tab-text { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tabs-count { display: flex; align-items: center; gap: 10px; }
+.tabs-count input { width: 70px; font-size: 16px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }

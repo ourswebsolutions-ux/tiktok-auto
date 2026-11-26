@@ -42,7 +42,11 @@ const TIKTOK_SCHEDULE_LIMIT = 30;
 const MAX_QUEUE_DAYS = 365;
 const BROWSER_GONE_RE = /Target (page, context or browser )?(has been )?closed|Browser has been closed|browser has disconnected|has been disconnected|Connection closed|WebSocket is not open/i;
 
-const newWorker = (name) => ({ name, busy: false, state: 'idle', text: '', postId: null, attention: null });
+// Worker = one job at a time. Image workers ("gen-0" ... "gen-9") each own one ChatGPT/Gemini tab that stays open and
+// is reused (new chat per post, retries in the same tab); the upload worker uses its own TikTok tab per job.
+const newWorker = (name) => ({ name, busy: false, state: 'idle', text: '', postId: null, attention: null, page: null, cooldownUntil: 0, retired: false });
+const MIN_TABS = 2;
+const MAX_TABS = 10;
 
 class Engine extends EventEmitter {
   constructor({ store, chrome, dirs, log, notify }) {
@@ -55,7 +59,8 @@ class Engine extends EventEmitter {
     this.timer = null;
     this.ticking = false;
     this.abort = { gen: false, upload: false };
-    this.workers = { gen: newWorker('Image generation'), upload: newWorker('TikTok upload') };
+    this.workers = { upload: newWorker('TikTok upload') };
+    this.syncGenWorkers();
     this.status = { phase: 'stopped', step: '', message: '', instructions: '' };
   }
 
@@ -66,9 +71,67 @@ class Engine extends EventEmitter {
 
   get running() { return this.genEnabled() || this.uploadEnabled(); }
 
-  workerEnabled(key) { return key === 'gen' ? this.genEnabled() : this.uploadEnabled(); }
+  workerEnabled(key) {
+    if (key === 'upload') return this.uploadEnabled();
+    return this.genEnabled() && !!this.workers[key] && !this.workers[key].retired;
+  }
 
-  get busy() { return this.workers.gen.busy || this.workers.upload.busy; }
+  // ---------- image generation mode: one tab, or several tabs in parallel ----------
+  genMode() { return this.store.getSetting('gen_mode', 'single') === 'multi' ? 'multi' : 'single'; }
+
+  genTabs() { return Math.max(MIN_TABS, Math.min(MAX_TABS, Number(this.store.getSetting('gen_tabs', '5')) || 5)); }
+
+  genCount() { return this.genMode() === 'multi' ? this.genTabs() : 1; }
+
+  genKeys() { return Object.keys(this.workers).filter((k) => k.startsWith('gen-') && !this.workers[k].retired); }
+
+  // Creates/retires image workers to match the selected mode. A retired worker finishes its current post first.
+  syncGenWorkers() {
+    const n = this.genCount();
+    for (let i = 0; i < n; i++) {
+      const k = `gen-${i}`;
+      if (!this.workers[k]) this.workers[k] = newWorker(`Tab ${i + 1}`);
+      else this.workers[k].retired = false;
+    }
+    for (const k of Object.keys(this.workers)) {
+      if (k.startsWith('gen-') && Number(k.slice(4)) >= n) {
+        this.workers[k].retired = true;
+        if (!this.workers[k].busy) this.releaseWorker(k);
+      }
+    }
+  }
+
+  releaseWorker(k) {
+    const w = this.workers[k];
+    if (!w) return;
+    if (w.page) this.chrome.closePage(w.page);
+    w.page = null;
+    if (w.retired) delete this.workers[k];
+  }
+
+  // Generate OFF: close the managed image tabs (a tab still busy is closed when its job stops).
+  releaseGenTabs() {
+    for (const k of Object.keys(this.workers)) {
+      if (k.startsWith('gen-') && !this.workers[k].busy) {
+        const w = this.workers[k];
+        if (w.page) this.chrome.closePage(w.page);
+        w.page = null;
+        Object.assign(w, { state: 'idle', text: '', postId: null, cooldownUntil: 0 });
+      }
+    }
+  }
+
+  setGenMode(mode, tabs) {
+    this.store.setSetting('gen_mode', mode === 'multi' ? 'multi' : 'single');
+    if (tabs !== undefined && tabs !== null) this.store.setSetting('gen_tabs', String(Math.max(MIN_TABS, Math.min(MAX_TABS, Math.round(Number(tabs) || 5)))));
+    this.syncGenWorkers();
+    this.log.info(`Image generation: ${this.genMode() === 'multi' ? `${this.genTabs()} tabs in parallel` : 'single tab'}`);
+    this.emit('change');
+    if (this.genEnabled()) setTimeout(() => this.runGenWorkers(), 200);
+    return { ok: true, mode: this.genMode(), tabs: this.genTabs() };
+  }
+
+  get busy() { return Object.values(this.workers).some((w) => w.busy); }
 
   dailyQuantity() { return Number(this.store.getSetting('daily_quantity', '3')) || 0; }
 
@@ -129,7 +192,7 @@ class Engine extends EventEmitter {
     this.store.setSetting('gen_enabled', on ? '1' : '0');
     this.abort.gen = !on; // OFF: stops the current generation and all retries right away
     this.log.info(`Generate images: ${on ? 'ON' : 'OFF'}`);
-    if (!on) { this.stopLoopIfIdle(); this.setWorker('gen', { state: 'idle', text: '', postId: null }); return { ok: true }; }
+    if (!on) { this.releaseGenTabs(); this.stopLoopIfIdle(); this.emit('change'); return { ok: true }; }
     return this.startLoop();
   }
 
@@ -302,7 +365,7 @@ class Engine extends EventEmitter {
       this.ticking = false;
     }
     if (this.running && this.chrome.isConnected()) {
-      this.runGenWorker();
+      this.runGenWorkers();
       this.runUploadWorker();
     }
   }
@@ -319,7 +382,7 @@ class Engine extends EventEmitter {
   // Common worker wrapper: one job at a time per worker, then immediately looks for the next one.
   async runWorker(key, pick, job) {
     const w = this.workers[key];
-    if (w.busy || !this.workerEnabled(key) || !this.chrome.isConnected()) return;
+    if (!w || w.busy || !this.workerEnabled(key) || !this.chrome.isConnected()) return;
     w.busy = true;
     let didWork = false;
     try {
@@ -341,7 +404,8 @@ class Engine extends EventEmitter {
       if (!this.running && !this.busy && this.status.phase === 'stopping') this.setStatus({ phase: 'stopped', step: '' });
       this.emit('change');
       // Continue right away with the next post - no idle time between posts.
-      if (didWork && this.workerEnabled(key)) setTimeout(() => (key === 'gen' ? this.runGenWorker() : this.runUploadWorker()), 500);
+      if (w.retired) this.releaseWorker(key);
+      if (didWork && this.workerEnabled(key)) setTimeout(() => (key === 'upload' ? this.runUploadWorker() : this.runGenWorker(key)), 500);
     }
   }
 
@@ -351,22 +415,41 @@ class Engine extends EventEmitter {
     return Date.now() < until ? until : 0;
   }
 
-  runGenWorker() {
-    return this.runWorker('gen', () => {
+  // Starts every image worker (several tabs are opened a little apart, not all at the same moment).
+  runGenWorkers() {
+    this.syncGenWorkers();
+    return Promise.all(this.genKeys().map((k, i) => {
+      const w = this.workers[k];
+      if (i > 0 && !w.page && !w.busy) return new Promise((r) => setTimeout(() => r(this.runGenWorker(k)), i * 2000));
+      return this.runGenWorker(k);
+    }));
+  }
+
+  runGenWorker(key = 'gen-0') {
+    return this.runWorker(key, () => {
+      const w = this.workers[key];
       const until = this.providerPausedUntil();
       if (until) {
-        this.setWorker('gen', { state: 'paused', postId: null, text: `${this.ai().name} image limit reached - continues automatically at ${new Date(until).toTimeString().slice(0, 5)}` });
+        // The AI's limit is per account: every tab waits until it resets.
+        this.setWorker(key, { state: 'paused', postId: null, text: `${this.ai().name} image limit reached - continues automatically at ${new Date(until).toTimeString().slice(0, 5)}` });
         return null;
       }
-      let post = this.store.nextToGenerate(Date.now());
-      // Continuous generation: when every planned post has its image, plan the next day and keep going.
-      if (!post && !this.store.countByStatus().scheduled && this.planNextDay()) post = this.store.nextToGenerate(Date.now());
-      if (!post) {
-        const waiting = this.store.countByStatus().scheduled || 0;
-        this.setWorker('gen', { state: 'idle', postId: null, text: waiting ? `Retrying shortly (${waiting} waiting for an image)` : `Queue is full (${MAX_QUEUE_DAYS} days ahead)` });
+      if (Date.now() < w.cooldownUntil) {
+        this.setWorker(key, { state: 'paused', postId: null, text: 'Pausing briefly after an error' });
+        return null;
       }
-      return post;
-    }, (post) => this.generateOne(post));
+      // Central queue: claim a post atomically, so no two tabs ever work on the same post.
+      for (let i = 0; i < 5; i++) {
+        let post = this.store.nextToGenerate(Date.now());
+        // Continuous generation: when every planned post has its image, plan the next day and keep going.
+        if (!post && !this.store.countByStatus().scheduled && this.planNextDay()) post = this.store.nextToGenerate(Date.now());
+        if (!post) break;
+        if (this.store.claimForGeneration(post.id)) return post;
+      }
+      const waiting = this.store.countByStatus().scheduled || 0;
+      this.setWorker(key, { state: 'idle', postId: null, text: waiting ? `Retrying shortly (${waiting} waiting for an image)` : 'Nothing to generate right now' });
+      return null;
+    }, (post) => this.generateOne(post, key));
   }
 
   postLog(id) {
@@ -377,17 +460,20 @@ class Engine extends EventEmitter {
     };
   }
 
-  async generateOne(post) {
+  async generateOne(post, key = 'gen-0') {
     const id = post.id;
     const log = this.postLog(id);
     const ai = this.ai();
-    const step = (s) => { this.store.updatePost(id, { step: s }); this.setWorker('gen', { state: 'working', text: s, postId: id }); log.info(s); };
+    const w = this.workers[key];
+    const step = (s) => { this.store.updatePost(id, { step: s }); this.setWorker(key, { state: 'working', text: s, postId: id }); log.info(`[${w.name}] ${s}`); };
     this.store.updatePost(id, { status: 'generating', gen_attempts: (post.gen_attempts || 0) + 1, error: null });
     step(`Generating image in ${ai.name}`);
     let page = null;
     let keepPage = false;
     try {
-      page = await this.chrome.newPage();
+      // This worker's own tab: opened once, reused for every post and retry.
+      if (!w.page || w.page.isClosed()) w.page = await this.chrome.newPage();
+      page = w.page;
       const p = this.store.getPost(id);
       const prompt = (p.prompt_id && this.store.getPrompt(p.prompt_id)) || this.store.nextPrompt();
       if (!prompt) throw new UiError('No prompts configured');
@@ -398,7 +484,8 @@ class Engine extends EventEmitter {
       const c = await ai.generatePost(page, {
         userPrompt: prompt.text,
         recent,
-        isDuplicate: (x) => this.duplicateReason(x, recent, id),
+        // Checked against the newest posts at that moment (other tabs may have just finished).
+        isDuplicate: (x) => this.duplicateReason(x, this.store.recentContent(40), id),
         isDuplicateImage: (buf) => this.store.imageHashUsed(sha256(buf), id),
         fileBase: path.join(this.dirs.media, `post-${id}-${Date.now()}`),
         log,
@@ -415,11 +502,11 @@ class Engine extends EventEmitter {
       this.exportPost(id);
       setTimeout(() => this.runUploadWorker(), 200);
     } catch (e) {
-      keepPage = await this.handleError('gen', id, e, page, log);
+      keepPage = await this.handleError(key, id, e, page, log);
     } finally {
-      if (page && !keepPage) await this.chrome.closePage(page);
-      const w = this.workers.gen;
-      this.setWorker('gen', { state: w.attention ? 'attention' : 'idle', text: w.attention ? w.text : '', postId: null });
+      if (keepPage) w.page = null; // the tab now belongs to the "needs your attention" state
+      else if (w.page && (!this.genEnabled() || w.retired || w.page.isClosed())) { await this.chrome.closePage(w.page); w.page = null; }
+      this.setWorker(key, { state: w.attention ? 'attention' : 'idle', text: w.attention ? w.text : '', postId: null });
     }
   }
 
@@ -529,7 +616,7 @@ class Engine extends EventEmitter {
   async handleError(key, id, e, page, log) {
     const post = this.store.getPost(id);
     const now = Date.now();
-    const gen = key === 'gen';
+    const gen = key !== 'upload';
     const back = gen ? 'scheduled' : 'ready';
     const attempts = gen ? (post.gen_attempts || 0) : post.attempts;
     const undoAttempt = gen ? { gen_attempts: Math.max(0, attempts - 1) } : { attempts: Math.max(0, attempts - 1) };
@@ -561,6 +648,7 @@ class Engine extends EventEmitter {
       this.notify('Action needed in Chrome', e.message);
       return true;
     }
+    if (gen && this.workers[key] && (e instanceof ChromeUnavailableError || BROWSER_GONE_RE.test(e.message))) this.workers[key].page = null;
     if (e instanceof ChromeUnavailableError || BROWSER_GONE_RE.test(e.message)) {
       this.store.updatePost(id, { status: back, ...undoAttempt, next_try_at: now + 15000, error: `Chrome connection lost: ${e.message.split('\n')[0]}` });
       log.warn(`Chrome connection lost; will continue when Chrome is available. (${e.message.split('\n')[0]})`);
@@ -583,6 +671,12 @@ class Engine extends EventEmitter {
     // Recoverable: retried on its own timer (at once, then 15 s, 30 s, max 1 min); other posts continue meanwhile.
     const delay = retryDelayMs(attempts);
     this.store.updatePost(id, { status: back, next_try_at: now + delay, error: msg });
+    if (gen && this.workers[key]) {
+      // This tab pauses briefly (the others continue) and then retries in the same tab.
+      const pause = Math.max(5000, delay);
+      this.workers[key].cooldownUntil = now + pause;
+      setTimeout(() => this.runGenWorker(key), pause + 200);
+    }
     log.warn(`${gen ? 'Image' : 'Upload'} attempt ${attempts} failed, retrying ${delay ? `in ${Math.round(delay / 1000)} s` : 'now'}: ${msg}`);
     return false;
   }
@@ -651,6 +745,15 @@ class Engine extends EventEmitter {
     return null;
   }
 
+  // One line for all image tabs (the dashboard also lists every tab).
+  genSummary() {
+    const ws = this.genKeys().map((k) => this.workers[k]);
+    const working = ws.filter((w) => w.state === 'working').length;
+    const state = ws.some((w) => w.attention) ? 'attention' : working ? 'working' : ws.length && ws.every((w) => w.state === 'paused') ? 'paused' : 'idle';
+    const text = ws.length > 1 ? `${working} of ${ws.length} tabs generating` : (ws[0] ? ws[0].text : '');
+    return { state, text, postId: ws.length === 1 && ws[0] ? ws[0].postId : null, busy: ws.some((w) => w.busy), attention: ws.some((w) => w.attention) };
+  }
+
   // ---------- UI state ----------
   snapshot() {
     const today = dayKey();
@@ -660,7 +763,9 @@ class Engine extends EventEmitter {
     return {
       running: this.running,
       status: { ...this.status, nextPostAt: next ? next.scheduled_at : null, chromeConnected: this.chrome.isConnected() },
-      workers: { gen: worker(this.workers.gen), upload: worker(this.workers.upload) },
+      workers: { gen: this.genSummary(), upload: worker(this.workers.upload) },
+      genTabs: this.genKeys().map((k) => ({ key: k, ...worker(this.workers[k]) })),
+      genMode: { mode: this.genMode(), tabs: this.genTabs(), active: this.genKeys().length },
       queue: { waitingForImage: counts.scheduled || 0, generating: counts.generating || 0, ready: counts.ready || 0, uploading: (counts.uploading || 0) + (counts.posting || 0) },
       switches: { generate: this.genEnabled(), upload: this.uploadEnabled() },
       overview: {

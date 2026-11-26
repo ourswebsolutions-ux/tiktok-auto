@@ -115,6 +115,24 @@ posting times are the same in both modes, and automation runs continuously until
 - Status cards: *Images generated*, *Posts pending upload*, *Posts scheduled on TikTok*, *Posts published*,
   *Upload limit* (x/30).
 
+## Generation mode: single tab or multiple tabs in parallel
+
+*Generation mode* on the dashboard:
+
+- **Single tab** – one ChatGPT (or Gemini) tab generates images one after another.
+- **Multiple tabs** – "How many ChatGPT tabs do you want to use?" (2–10, default 5). Each tab is an independent
+  image worker in your own Chrome: it takes the next post from one central queue (a post can never be taken by two
+  tabs), sends that post's prompt in a new chat, waits for a real image, exports it, and immediately takes the next
+  post. A failing tab retries in the same tab after a short pause while the other tabs continue. The dashboard lists
+  every tab and what it is doing.
+- Ideas, captions and images are checked against all posts including the ones other tabs just finished, so parallel
+  tabs never produce duplicates.
+- **Limits are respected:** more tabs do not mean more images than ChatGPT allows. When ChatGPT reports a usage
+  limit (it applies to the whole account), all tabs pause until it resets. Each open ChatGPT tab also uses memory –
+  choose fewer tabs on a slower computer.
+- Turning *Generate images* OFF stops all tabs' jobs and retries and closes the managed tabs. Mode and tab count are
+  remembered.
+
 ## How it works: two independent workers
 
 The app runs two workers at the same time, each in its own Chrome tab:

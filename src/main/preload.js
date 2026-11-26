@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('api', {
   setAiProvider: (p) => ipcRenderer.invoke('ai:set', p),
   setSoundStyle: (v) => ipcRenderer.invoke('sound:set', v),
   setGenerate: (on) => ipcRenderer.invoke('generate:set', on),
+  setGenMode: (mode, tabs) => ipcRenderer.invoke('genmode:set', mode, tabs),
   setUpload: (on) => ipcRenderer.invoke('upload:set', on),
   openExport: () => ipcRenderer.invoke('export:open'),
   start: () => ipcRenderer.invoke('automation:start'),

@@ -122,6 +122,7 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('sound:set', (_e, v) => { engine.setSoundStyle(v); return { ok: true, value: engine.soundStyle() }; });
     ipcMain.handle('ai:set', (_e, p) => { engine.setAiProvider(p); return { ok: true, value: engine.aiProvider() }; });
     ipcMain.handle('mode:set', (_e, mode) => { engine.setSchedulingMode(mode); return { ok: true, value: engine.schedulingMode() }; });
+    ipcMain.handle('genmode:set', (_e, mode, tabs) => engine.setGenMode(mode, tabs));
     ipcMain.handle('generate:set', (_e, on) => engine.setGenerate(!!on));
     ipcMain.handle('upload:set', (_e, on) => engine.setUpload(!!on));
     ipcMain.handle('export:open', async () => { fs.mkdirSync(dirs.export, { recursive: true }); const err = await shell.openPath(dirs.export); return { ok: !err, message: err }; });

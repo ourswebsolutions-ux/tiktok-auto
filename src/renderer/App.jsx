@@ -59,7 +59,7 @@ const WORKER_STATE = {
 
 // One live status card per worker (image generation / TikTok upload). A progress bar only appears when the website
 // itself reports a percentage.
-function WorkerCard({ icon, title, worker, running, footer }) {
+function WorkerCard({ icon, title, worker, running, footer, tabs }) {
   const [label, tone] = running ? (WORKER_STATE[worker.state] || ['Idle', 'ok']) : ['Off', 'off'];
   const pct = (worker.text || '').match(/(\d{1,3})%/);
   return (
@@ -74,6 +74,20 @@ function WorkerCard({ icon, title, worker, running, footer }) {
         {worker.postId ? <span className="muted"> · post #{worker.postId}</span> : null}
       </p>
       {running && pct && <div className="bar"><span style={{ width: `${Math.min(100, Number(pct[1]))}%` }} /></div>}
+      {running && tabs && tabs.length > 1 && (
+        <ul className="tabs-list">
+          {tabs.map((t) => {
+            const [tl, tt] = WORKER_STATE[t.state] || ['Idle', 'ok'];
+            return (
+              <li key={t.key}>
+                <span className={`pill ${tt}`}>{tl}</span>
+                <span className="tab-name">Tab {Number(t.key.slice(4)) + 1}</span>
+                <span className="tab-text">{t.text || 'Waiting for the next post'}{t.postId ? ` · post #${t.postId}` : ''}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
       <p className="worker-foot">{footer}</p>
     </div>
   );
@@ -134,11 +148,13 @@ export default function App() {
   const [notice, setNotice] = useState(null); // { tone, title, text }
   const [checking, setChecking] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [tabsInput, setTabsInput] = useState('');
 
   const refresh = useCallback(async () => {
     const s = await api.getState();
     setState(s);
     setQty((q) => (q === '' ? String(s.dailyQuantity) : q));
+    setTabsInput((t) => (t === '' && s.genMode ? String(s.genMode.tabs) : t));
   }, []);
 
   useEffect(() => {
@@ -190,6 +206,7 @@ export default function App() {
   const sw = state.switches || { generate: false, upload: false };
   const ov = state.overview || { imagesGenerated: 0, pendingUpload: 0, scheduledOnTikTok: 0, published: 0, publishedToday: 0, limit: 30 };
   const limitFull = ov.scheduledOnTikTok >= ov.limit;
+  const gm = state.genMode || { mode: 'single', tabs: 5, active: 1 };
   const aiName = state.aiProvider === 'gemini' ? 'Gemini' : 'ChatGPT';
 
   return (
@@ -240,7 +257,8 @@ export default function App() {
         <div className="workers">
           <WorkerCard
             icon="🖼"
-            title={`Image generation · ${aiName}`}
+            title={`Image generation · ${aiName} · ${gm.mode === 'multi' ? `${gm.active} tabs` : '1 tab'}`}
+            tabs={state.genTabs}
             worker={state.workers ? state.workers.gen : {}}
             running={sw.generate}
             footer={`${q.waitingForImage} waiting for an image · ${q.generating} generating`}
@@ -287,6 +305,30 @@ export default function App() {
             <button type="button" role="radio" aria-checked={state.aiProvider === 'gemini'} className={state.aiProvider === 'gemini' ? 'on' : ''} onClick={() => api.setAiProvider('gemini').then(refresh)}>Gemini</button>
           </div>
         </div>
+        <div className="setting" role="radiogroup" aria-label="Generation mode">
+          <label>Generation mode</label>
+          <div className="segmented">
+            <button type="button" role="radio" aria-checked={gm.mode !== 'multi'} className={gm.mode !== 'multi' ? 'on' : ''} onClick={() => api.setGenMode('single').then(refresh)}>Single tab</button>
+            <button type="button" role="radio" aria-checked={gm.mode === 'multi'} className={gm.mode === 'multi' ? 'on' : ''} onClick={() => api.setGenMode('multi', gm.tabs).then(refresh)}>Multiple tabs</button>
+          </div>
+        </div>
+        {gm.mode === 'multi' && (
+          <div className="setting">
+            <label htmlFor="tabs">How many ChatGPT tabs do you want to use?</label>
+            <div className="tabs-count">
+              <input
+                id="tabs"
+                type="number"
+                min={2}
+                max={10}
+                value={tabsInput}
+                onChange={(e) => setTabsInput(e.target.value)}
+                onBlur={() => api.setGenMode('multi', tabsInput).then((r) => { setTabsInput(String(r.tabs)); refresh(); })}
+              />
+              <strong>{gm.tabs} tabs</strong>
+            </div>
+          </div>
+        )}
         <div className="setting" role="radiogroup" aria-label="Sound on posts">
           <label>Sound</label>
           <div className="segmented">
