@@ -2,36 +2,69 @@ import React, { useCallback, useEffect, useState } from 'react';
 
 const api = window.api;
 
-const STATUS_LABELS = {
-  published: 'Published',
-  scheduled: 'Scheduled',
-  generating: 'Generating',
-  uploading: 'Uploading',
-  posting: 'Publishing',
-  unverified: 'Confirming',
-  tiktok_scheduled: 'Scheduled on TikTok',
-  failed: 'Failed',
-  missed: 'Missed',
-  cancelled: 'Cancelled',
-};
+// Post status shown in the schedule list (real states from the two workers - nothing invented).
+function postLabel(h, mode) {
+  const retry = !!h.error;
+  switch (h.status) {
+    case 'scheduled': return retry ? ['Temporarily failed - retrying', 'retry'] : ['Waiting for image', 'scheduled'];
+    case 'generating': return ['Generating image', 'generating'];
+    case 'ready': return retry ? ['Retrying upload', 'retry'] : ['Image ready - waiting for upload', 'ready'];
+    case 'uploading': return ['Uploading to TikTok', 'uploading'];
+    case 'posting': return [mode === 'tiktok' ? 'Scheduling on TikTok' : 'Publishing', 'uploading'];
+    case 'unverified': return ['Uploading again', 'retry'];
+    case 'tiktok_scheduled': return ['Successfully scheduled', 'tiktok_scheduled'];
+    case 'published': return ['Published', 'published'];
+    case 'failed': return ['Failed', 'failed'];
+    case 'missed': return ['Missed', 'missed'];
+    case 'cancelled': return ['Cancelled', 'cancelled'];
+    default: return [h.status, h.status];
+  }
+}
 
 const fmtDate = (t) => (t ? new Date(t).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }) : '');
 const fmtTime = (t) => (t ? new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '');
 
 function statusLine(state) {
   const s = state.status;
-  if (s.phase === 'attention') return { tone: 'warn', text: 'Needs your attention' };
-  if (s.phase === 'chrome') return { tone: 'warn', text: 'Waiting for Chrome' };
-  if (s.phase === 'working' || s.phase === 'connecting') return { tone: 'busy', text: s.step || 'Working...' };
-  if (s.phase === 'stopping') return { tone: 'busy', text: 'Stopping...' };
+  if (s.phase === 'attention') return { tone: 'warn', title: 'Needs your attention', text: s.message || 'Action needed in Chrome' };
+  if (s.phase === 'chrome') return { tone: 'warn', title: 'Waiting for Chrome', text: s.message || 'Chrome is not reachable' };
+  if (s.phase === 'connecting') return { tone: 'busy', title: 'Connecting', text: s.step || 'Connecting to your Chrome...' };
+  if (s.phase === 'stopping') return { tone: 'busy', title: 'Stopping', text: 'Finishing the current step...' };
   if (state.running) {
-    if (s.step && /limit reached|keep a gap|retrying/i.test(s.step)) return { tone: 'warn', text: s.step };
-    if (state.schedulingMode === 'tiktok') {
-      return { tone: 'ok', text: s.nextPostAt ? `Running (TikTok scheduling) - next upload for ${fmtTime(s.nextPostAt)}` : 'Running (TikTok scheduling) - today\'s posts are scheduled on TikTok' };
-    }
-    return { tone: 'ok', text: s.nextPostAt ? `Running - next post at ${fmtTime(s.nextPostAt)}` : (s.step || 'Running - daily target reached') };
+    const mode = state.schedulingMode === 'tiktok' ? 'TikTok-Based scheduling' : 'Software-Based scheduling';
+    return { tone: 'ok', title: 'Running', text: s.nextPostAt ? `${mode} · next post ${fmtTime(s.nextPostAt)}` : mode };
   }
-  return { tone: 'off', text: 'Stopped' };
+  return { tone: 'off', title: 'Stopped', text: 'Press Start to generate and post automatically' };
+}
+
+const WORKER_STATE = {
+  working: ['Working', 'busy'],
+  idle: ['Idle', 'ok'],
+  waiting: ['Waiting', 'off'],
+  paused: ['Paused', 'warn'],
+  attention: ['Needs you', 'warn'],
+};
+
+// One live status card per worker (image generation / TikTok upload). A progress bar only appears when the website
+// itself reports a percentage.
+function WorkerCard({ icon, title, worker, running, footer }) {
+  const [label, tone] = running ? (WORKER_STATE[worker.state] || ['Idle', 'ok']) : ['Stopped', 'off'];
+  const pct = (worker.text || '').match(/(\d{1,3})%/);
+  return (
+    <div className={`worker ${running ? tone : 'off'}`}>
+      <div className="worker-head">
+        <span className="worker-icon" aria-hidden>{icon}</span>
+        <strong>{title}</strong>
+        <span className={`pill ${running ? tone : 'off'}`}>{label}</span>
+      </div>
+      <p className="worker-text">
+        {running ? (worker.text || (worker.state === 'idle' ? 'Nothing to do right now' : '...')) : 'Starts with the automation'}
+        {worker.postId ? <span className="muted"> · post #{worker.postId}</span> : null}
+      </p>
+      {running && pct && <div className="bar"><span style={{ width: `${Math.min(100, Number(pct[1]))}%` }} /></div>}
+      <p className="worker-foot">{footer}</p>
+    </div>
+  );
 }
 
 function updateText(appInfo) {
@@ -140,6 +173,9 @@ export default function App() {
     }
   };
 
+  const q = state.queue || { waitingForImage: 0, generating: 0, ready: 0, uploading: 0 };
+  const aiName = state.aiProvider === 'gemini' ? 'Gemini' : 'ChatGPT';
+
   return (
     <div className="app">
       <header>
@@ -148,14 +184,12 @@ export default function App() {
           <h1>TikTok Auto Poster</h1>
           <span className="version" title={(state.app && state.app.update && state.app.update.message) || ''}>{updateText(state.app)}</span>
         </div>
-        <div className={`status ${st.tone}`}><span className="dot" />{st.text}</div>
       </header>
 
       {(s.phase === 'attention' || s.phase === 'chrome') && (
         <div className="banner warn">
           <div>
             <strong>{s.message}</strong>
-            {s.phase === 'attention' && <p>{s.step}</p>}
             {s.phase === 'chrome' && s.instructions && <pre>{s.instructions}</pre>}
           </div>
           {s.phase === 'attention' && <button className="btn primary" onClick={() => api.resume().then(refresh)}>Resume</button>}
@@ -172,80 +206,80 @@ export default function App() {
         </div>
       )}
 
-      <section className="grid">
-        <div className="card controls">
-          <label htmlFor="qty">Posts per day</label>
-          <div className="qty-row">
-            <input
-              id="qty"
-              type="number"
-              min={1}
-              max={20}
-              value={qty}
-              onChange={(e) => setQty(e.target.value)}
-              onBlur={() => saveQty(qty)}
-            />
+      <section className="card hero">
+        <div className="hero-top">
+          <div className={`status-big ${st.tone}`}>
+            <span className="dot" />
+            <div>
+              <strong>{st.title}</strong>
+              <span>{st.text}</span>
+            </div>
+          </div>
+          <div className="hero-actions">
+            <button className="btn ghost" disabled={checking} onClick={check}>{checking ? 'Checking...' : 'Check Chrome'}</button>
             {state.running
-              ? <button className="btn stop" onClick={() => api.stop().then(refresh)}>Stop Automation</button>
-              : <button className="btn primary" onClick={start} disabled={!state.prompts.length}>Start Automation</button>}
+              ? <button className="btn stop big" onClick={() => api.stop().then(refresh)}>■ Stop</button>
+              : <button className="btn primary big" onClick={start} disabled={!state.prompts.length}>▶ Start Automation</button>}
           </div>
-          <div className="mode-row" role="radiogroup" aria-label="Image and caption by">
-            <span className="mode-label">Image &amp; caption</span>
-            <div className="segmented">
-              <button
-                type="button"
-                role="radio"
-                aria-checked={state.aiProvider !== 'gemini'}
-                className={state.aiProvider !== 'gemini' ? 'on' : ''}
-                onClick={() => api.setAiProvider('chatgpt').then(refresh)}
-              >
-                ChatGPT
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={state.aiProvider === 'gemini'}
-                className={state.aiProvider === 'gemini' ? 'on' : ''}
-                onClick={() => api.setAiProvider('gemini').then(refresh)}
-              >
-                Gemini
-              </button>
-            </div>
-          </div>
-          <div className="mode-row" role="radiogroup" aria-label="Scheduling">
-            <span className="mode-label">Scheduling</span>
-            <div className="segmented">
-              <button
-                type="button"
-                role="radio"
-                aria-checked={state.schedulingMode !== 'tiktok'}
-                className={state.schedulingMode !== 'tiktok' ? 'on' : ''}
-                onClick={() => api.setSchedulingMode('software').then(refresh)}
-              >
-                Software-Based
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={state.schedulingMode === 'tiktok'}
-                className={state.schedulingMode === 'tiktok' ? 'on' : ''}
-                onClick={() => api.setSchedulingMode('tiktok').then(refresh)}
-              >
-                TikTok-Based
-              </button>
-            </div>
-          </div>
-          <p className="hint">
-            {state.schedulingMode === 'tiktok'
-              ? 'Posts are uploaded one by one and scheduled on TikTok for the calculated times. The next 10 days (TikTok\'s maximum) are kept scheduled and a new day is added every day.'
-              : 'Posting times are calculated automatically and spread across the full 24 hours.'}
-            {' '}<button className="link" disabled={checking} onClick={check}>{checking ? 'Checking...' : 'Check Chrome connection'}</button>
-          </p>
         </div>
+        <div className="workers">
+          <WorkerCard
+            icon="🖼"
+            title={`Image generation · ${aiName}`}
+            worker={state.workers ? state.workers.gen : {}}
+            running={state.running}
+            footer={`${q.waitingForImage} waiting for an image · ${q.generating} generating`}
+          />
+          <WorkerCard
+            icon="⬆"
+            title="TikTok upload"
+            worker={state.workers ? state.workers.upload : {}}
+            running={state.running}
+            footer={`${q.ready} image(s) ready · ${q.uploading} uploading`}
+          />
+        </div>
+      </section>
+
+      <section className="stats">
         <div className="card stat"><span className="num">{state.stats.totalPublished}</span><span className="lbl">Total published</span></div>
         <div className="card stat"><span className="num">{state.stats.todayPublished}</span><span className="lbl">Published today</span></div>
         <div className="card stat"><span className="num">{state.stats.tiktokScheduled}</span><span className="lbl">Scheduled on TikTok</span></div>
+        <div className="card stat"><span className="num">{q.ready}</span><span className="lbl">Images ready</span></div>
         <div className="card stat"><span className="num">{state.stats.pending}</span><span className="lbl">Pending</span></div>
+      </section>
+
+      <section className="card settings">
+        <div className="setting">
+          <label htmlFor="qty">Posts per day</label>
+          <input
+            id="qty"
+            type="number"
+            min={1}
+            max={20}
+            value={qty}
+            onChange={(e) => setQty(e.target.value)}
+            onBlur={() => saveQty(qty)}
+          />
+        </div>
+        <div className="setting" role="radiogroup" aria-label="Image and caption by">
+          <label>Image &amp; caption</label>
+          <div className="segmented">
+            <button type="button" role="radio" aria-checked={state.aiProvider !== 'gemini'} className={state.aiProvider !== 'gemini' ? 'on' : ''} onClick={() => api.setAiProvider('chatgpt').then(refresh)}>ChatGPT</button>
+            <button type="button" role="radio" aria-checked={state.aiProvider === 'gemini'} className={state.aiProvider === 'gemini' ? 'on' : ''} onClick={() => api.setAiProvider('gemini').then(refresh)}>Gemini</button>
+          </div>
+        </div>
+        <div className="setting" role="radiogroup" aria-label="Scheduling">
+          <label>Scheduling</label>
+          <div className="segmented">
+            <button type="button" role="radio" aria-checked={state.schedulingMode !== 'tiktok'} className={state.schedulingMode !== 'tiktok' ? 'on' : ''} onClick={() => api.setSchedulingMode('software').then(refresh)}>Software-Based</button>
+            <button type="button" role="radio" aria-checked={state.schedulingMode === 'tiktok'} className={state.schedulingMode === 'tiktok' ? 'on' : ''} onClick={() => api.setSchedulingMode('tiktok').then(refresh)}>TikTok-Based</button>
+          </div>
+        </div>
+        <p className="hint">
+          {state.schedulingMode === 'tiktok'
+            ? 'Images are generated continuously and every ready post is scheduled on TikTok for its calculated time (next 10 days, TikTok\'s maximum).'
+            : 'Images are generated ahead of time; each post is published at its calculated time, spread across the full 24 hours.'}
+        </p>
       </section>
 
       <section className="card">
@@ -302,12 +336,12 @@ export default function App() {
                       <td>{h.image_path ? <img className="thumb" src={fileUrl(h.image_path)} alt="" loading="lazy" /> : <span className="thumb empty-thumb" />}</td>
                       <td className="caption"><div className="cap">
                         {h.title && <strong>{h.title}</strong>}
-                        <span>{h.caption || <em className="muted">Content is generated at posting time</em>}</span>
+                        <span>{h.caption || <em className="muted">Image will be generated automatically</em>}</span>
                         {h.hashtags.length > 0 && <span className="tags">{h.hashtags.join(' ')}</span>}
                         {h.sound_title && <span className="sound" title={h.sound_evidence || ''}>♪ {h.sound_title}</span>}
                         {h.error && h.status !== 'published' && <span className="error" title={h.error}>{shortError(h.error)}</span>}
                       </div></td>
-                      <td><span className={`badge ${h.status}`}>{STATUS_LABELS[h.status] || h.status}</span></td>
+                      <td>{(() => { const [label, cls] = postLabel(h, state.schedulingMode); return <span className={`badge ${cls}`}>{label}</span>; })()}</td>
                     </tr>
                   );
                 })}

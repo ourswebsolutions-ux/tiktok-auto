@@ -8,7 +8,9 @@
 //           each with a "Use" control. TikTok's own sound data (incl. user_count = number of videos using
 //           the sound) is read passively from the responses the picker itself loads.
 
-const { NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet, safeClick, gotoSafe } = require('./util');
+const {
+  NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet, safeClick, gotoSafe, ActivityMonitor, waitActive,
+} = require('./util');
 
 const UPLOAD_URL = 'https://www.tiktok.com/tiktokstudio/upload?from=webapp';
 const MIN_SOUND_USES = 10000; // a sound must be visibly used in at least this many videos to count as popular
@@ -22,13 +24,18 @@ function assertNotLoginPage(page) {
   }
 }
 
-async function openUploader(page, shouldAbort) {
+async function openUploader(page, shouldAbort, monitor, onProgress) {
   await gotoSafe(page, UPLOAD_URL);
-  // TikTok Studio can take 30-60 s to load on slow connections.
-  await waitUntil(page, async () => {
-    assertNotLoginPage(page);
-    return (await page.locator('input[type=file]').count()) > 0;
-  }, { timeout: 300000, label: 'TikTok upload page', site: SITE, shouldAbort });
+  // TikTok Studio can take minutes to load on slow connections: wait as long as it is still loading.
+  const own = monitor || new ActivityMonitor(page);
+  try {
+    await waitActive(page, own, async () => {
+      assertNotLoginPage(page);
+      return (await page.locator('input[type=file]').count()) > 0;
+    }, { idleTimeout: 2 * 60 * 1000, maxTotal: 20 * 60 * 1000, label: 'Loading TikTok Studio', site: SITE, shouldAbort, onProgress });
+  } finally {
+    if (!monitor) own.dispose();
+  }
 }
 
 // Read-only check: loads the uploader and confirms we are logged in. Uploads nothing.
@@ -54,16 +61,18 @@ async function dismissInfoDialogs(page) {
 // Click with popup handling and a readable error message naming the element.
 const tclick = (page, locator, label) => safeClick(page, locator, label, dismissInfoDialogs);
 
-async function uploadPhoto(page, imagePath, shouldAbort) {
+async function uploadPhoto(page, imagePath, shouldAbort, monitor, onProgress) {
   const photosTab = page.getByText('Photos', { exact: true }).first();
   await waitUntil(page, () => visible(photosTab), { timeout: 120000, label: 'Photos tab on the upload page', site: SITE, shouldAbort });
   await tclick(page, photosTab, 'TikTok "Photos" tab');
   const input = page.locator('input[type=file][accept*="image"]').first();
   await waitUntil(page, async () => (await page.locator('input[type=file][accept*="image"]').count()) > 0, { timeout: 60000, label: 'photo file input', site: SITE });
-  await input.setInputFiles(imagePath);
-  await waitUntil(page, async () => (await visible(page.getByRole('button', { name: /add sound/i })))
-    && (await visible(page.locator('[data-e2e=caption_container]'))), { timeout: 600000, label: 'TikTok post editor after photo upload', site: SITE, shouldAbort });
-  await waitUntil(page, () => visible(page.getByText(/1 photo uploaded/i)), { timeout: 600000, label: '"1 photo uploaded" confirmation', site: SITE });
+  await input.setInputFiles(imagePath, { timeout: 5 * 60 * 1000 });
+  monitor.touch();
+  // The upload may take long on slow internet: keep waiting while data is still moving (no fixed total time).
+  await waitActive(page, monitor, async () => (await visible(page.getByRole('button', { name: /add sound/i })))
+    && (await visible(page.locator('[data-e2e=caption_container]')))
+    && (await visible(page.getByText(/1 photo uploaded/i))), { label: 'Uploading image to TikTok', site: SITE, shouldAbort, onProgress });
   await sleep(1500);
   await dismissInfoDialogs(page);
 }
@@ -416,14 +425,16 @@ async function scheduleStillMatches(page, scheduledFor) {
 const SUCCESS_RE = /(your (post|video|photo)s? (has been|have been|is being|was|were) (posted|published|uploaded|shared|scheduled))|(posted|published|uploaded|scheduled) successfully|manage your posts|view (your )?post/i;
 const FAIL_RE = /(couldn['’]t|could not|failed to|unable to) (post|publish|upload)|something went wrong|(posting|uploading) too (fast|frequently|often)|reached (the|your) (daily )?(post|upload)ing? limit|try again later/i;
 
-async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
+async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post', monitor, onProgress) {
   // With "Schedule" selected TikTok renames the Post button to "Schedule" (the radio label is not a button).
   const postBtn = page.getByRole('button', { name: buttonName, exact: true }).last();
-  await waitUntil(page, async () => (await visible(postBtn)) && (await postBtn.isEnabled()) && (await postBtn.getAttribute('aria-disabled')) !== 'true',
-    { timeout: 600000, label: 'enabled ' + buttonName + ' button', site: SITE, shouldAbort });
+  // The button stays disabled while TikTok is still processing the upload: wait as long as that is progressing.
+  await waitActive(page, monitor, async () => (await visible(postBtn)) && (await postBtn.isEnabled()) && (await postBtn.getAttribute('aria-disabled')) !== 'true',
+    { label: 'TikTok processing the upload', site: SITE, shouldAbort, onProgress });
   const startUrl = page.url();
   await tclick(page, postBtn, 'TikTok "' + buttonName + '" button');
-  const res = await waitUntil(page, async () => {
+  monitor.touch();
+  const res = await waitActive(page, monitor, async () => {
     const confirm = page.locator('.TUXModal-overlay, [role=dialog]').getByRole('button', { name: /^(post now|post anyway|continue|confirm)$/i });
     if (await visible(confirm)) { await confirm.first().click().catch(() => {}); return null; }
     const text = await page.evaluate(() => document.body.innerText).catch(() => '');
@@ -431,7 +442,8 @@ async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
     if (page.url() !== startUrl && /tiktokstudio\/(content|post)/.test(page.url())) return { ok: true, signal: 'redirected to Posts page' };
     if (SUCCESS_RE.test(text)) return { ok: true, signal: (text.match(SUCCESS_RE) || [''])[0] };
     return null;
-  }, { timeout: 300000, interval: 1000, label: 'TikTok publish confirmation', site: SITE }).catch((e) => ({ ok: false, message: e.message, timeout: true }));
+  }, { idleTimeout: 3 * 60 * 1000, maxTotal: 30 * 60 * 1000, label: buttonName === 'Schedule' ? 'Scheduling on TikTok' : 'Publishing on TikTok', site: SITE, shouldAbort, onProgress })
+    .catch((e) => { if (e instanceof NeedsHumanError) throw e; return { ok: false, message: e.message, timeout: true }; });
   return res;
 }
 
@@ -441,11 +453,20 @@ async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
  * scheduleAt (ms): when set, the post is scheduled with TikTok's own "Schedule" option instead of posted now.
  * Returns { published: boolean, unverified?: boolean, signal, sound, scheduledFor? }.
  */
-async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, beforePost, onProgress, scheduleAt = null }) {
+async function publishPhotoPost(page, post, opts) {
+  const monitor = new ActivityMonitor(page);
+  try {
+    return await publishWithMonitor(page, post, { ...opts, monitor });
+  } finally {
+    monitor.dispose();
+  }
+}
+
+async function publishWithMonitor(page, post, { log, shouldAbort, recentSounds, beforePost, onProgress, scheduleAt = null, monitor }) {
   onProgress('Opening TikTok Studio');
-  await openUploader(page, shouldAbort);
+  await openUploader(page, shouldAbort, monitor, onProgress);
   onProgress('Uploading image to TikTok');
-  await uploadPhoto(page, post.image_path, shouldAbort);
+  await uploadPhoto(page, post.image_path, shouldAbort, monitor, onProgress);
 
   onProgress('Selecting a relevant popular sound');
   let sound = null;
@@ -486,7 +507,7 @@ async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, be
 
   await beforePost(sound);
   onProgress(scheduleAt ? 'Scheduling on TikTok' : 'Publishing');
-  const res = await clickPostAndConfirm(page, shouldAbort, scheduleAt ? 'Schedule' : 'Post');
+  const res = await clickPostAndConfirm(page, shouldAbort, scheduleAt ? 'Schedule' : 'Post', monitor, onProgress);
   // TikTok's own response right after the click is the confirmation (success message / switch to the Posts page).
   // No Posts-list search: scheduled posts are not listed there before their time anyway.
   const when = scheduledFor ? ` (scheduled on TikTok for ${scheduledFor})` : '';

@@ -89,6 +89,75 @@ async function safeClick(page, locator, label, dismiss) {
   throw new UiError(`Could not click ${label} (it is hidden, disabled or covered by a popup)`);
 }
 
+// Watches a tab's network activity, so long operations (photo upload, publishing) are judged by PROGRESS instead of a
+// fixed total time: a request still in flight or any data moving counts as "active". Only when nothing at all has
+// happened for the idle timeout is the operation considered stalled.
+class ActivityMonitor {
+  constructor(page) {
+    this.page = page;
+    this.inflight = new Set();
+    this.last = Date.now();
+    this.onRequest = (r) => { this.inflight.add(r); this.touch(); };
+    this.onDone = (r) => { this.inflight.delete(r); this.touch(); };
+    this.onResponse = () => this.touch();
+    page.on('request', this.onRequest);
+    page.on('requestfinished', this.onDone);
+    page.on('requestfailed', this.onDone);
+    page.on('response', this.onResponse);
+  }
+
+  touch() { this.last = Date.now(); }
+
+  // ms without any activity; 0 while a request (e.g. the photo upload itself) is still running.
+  idleFor() { return this.inflight.size ? 0 : Date.now() - this.last; }
+
+  dispose() {
+    this.page.off('request', this.onRequest);
+    this.page.off('requestfinished', this.onDone);
+    this.page.off('requestfailed', this.onDone);
+    this.page.off('response', this.onResponse);
+  }
+}
+
+// Waits for check() like waitUntil, but without a short fixed timeout: it keeps waiting as long as the tab shows
+// activity (network or a changing progress %). Fails only when stalled for idleTimeout or after maxTotal.
+// onProgress(text) reports real progress ("45%") and slow-but-active phases - never invented progress.
+async function waitActive(page, monitor, check, {
+  idleTimeout = 3 * 60 * 1000, maxTotal = 45 * 60 * 1000, label = 'TikTok', site, shouldAbort, onProgress,
+} = {}) {
+  const start = Date.now();
+  let lastPct = null;
+  let slowReported = false;
+  for (;;) {
+    if (shouldAbort && shouldAbort()) throw new AbortedError();
+    if (page.isClosed()) throw new Error('Browser tab was closed');
+    // eslint-disable-next-line no-await-in-loop
+    const v = await Promise.resolve(check()).catch(() => null);
+    if (v) return v;
+    // eslint-disable-next-line no-await-in-loop
+    const ch = await detectChallenge(page);
+    if (ch) throw new NeedsHumanError(`${site || 'Website'}: ${ch} needs your attention in Chrome.`, { site, page });
+    // Real progress shown by the website (e.g. "Uploading 45%").
+    // eslint-disable-next-line no-await-in-loop
+    const pct = await page.evaluate(() => {
+      const m = ((document.querySelector('main') || document.body).innerText || '').match(/(\d{1,3})\s?%/);
+      return m ? Number(m[1]) : null;
+    }).catch(() => null);
+    if (pct !== null && pct !== lastPct) { lastPct = pct; monitor.touch(); if (onProgress) onProgress(`${label} - ${pct}%`); }
+    const idle = monitor.idleFor();
+    if (idle > idleTimeout) {
+      throw new UiError(`${label}: no upload activity for ${Math.round(idle / 60000)} min (connection stalled)`);
+    }
+    if (Date.now() - start > maxTotal) throw new UiError(`${label}: still not finished after ${Math.round(maxTotal / 60000)} min`);
+    if (!slowReported && Date.now() - start > 60000 && onProgress) {
+      slowReported = true;
+      onProgress(`${label} - delayed by a slow connection, still in progress`);
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(1000);
+  }
+}
+
 // Opens a page in a way that survives slow / unstable internet: only waits for the first response (the caller
 // then waits for the actual element it needs) and retries network errors (reset, timeout, offline) up to 3 times.
 const NETWORK_ERROR_RE = /net::ERR_|Timeout \d+ms exceeded|NS_ERROR|ECONNRESET|socket hang up/i;
@@ -122,5 +191,5 @@ async function screenshot(page, dir, name) {
 module.exports = {
   NeedsHumanError, RateLimitError, UiError, AbortedError,
   sleep, normalize, wordSet, jaccard, sha256, captionKey,
-  detectChallenge, waitUntil, visible, safeClick, gotoSafe, screenshot,
+  detectChallenge, waitUntil, visible, safeClick, gotoSafe, screenshot, ActivityMonitor, waitActive,
 };

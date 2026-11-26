@@ -56,13 +56,16 @@ CREATE TABLE IF NOT EXISTS cache (
 
 // Statuses
 // 'tiktok_scheduled' = uploaded and scheduled with TikTok's own scheduler; published_at holds the TikTok post time.
-const ACTIVE_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified', 'published', 'tiktok_scheduled'];
+// Post life cycle: scheduled (slot, no image yet) -> generating -> ready (image + caption saved, waiting for upload)
+//   -> uploading -> posting (Post/Schedule clicked) -> tiktok_scheduled | published.
+const ACTIVE_STATUSES = ['scheduled', 'generating', 'ready', 'uploading', 'posting', 'unverified', 'published', 'tiktok_scheduled'];
 // Pending = still to be uploaded. Posts already scheduled on TikTok are counted separately.
-const PENDING_STATUSES = ['scheduled', 'generating', 'uploading', 'posting', 'unverified'];
+const PENDING_STATUSES = ['scheduled', 'generating', 'ready', 'uploading', 'posting', 'unverified'];
 const IN_PROGRESS_STATUSES = ['generating', 'uploading', 'posting'];
+const SLOT = 'COALESCE(slot_at, scheduled_at)';
 
 const POST_FIELDS = new Set([
-  'day', 'scheduled_at', 'slot_at', 'status', 'step', 'attempts', 'verify_checks', 'prompt_id', 'prompt_text', 'idea',
+  'day', 'scheduled_at', 'slot_at', 'next_try_at', 'gen_attempts', 'status', 'step', 'attempts', 'verify_checks', 'prompt_id', 'prompt_text', 'idea',
   'image_prompt', 'caption', 'hashtags', 'music_keywords', 'title', 'topic_keywords', 'image_path', 'image_hash',
   'sound_title', 'sound_evidence', 'caption_key', 'error', 'published_at',
 ]);
@@ -94,6 +97,9 @@ class Store {
       this.db.exec('ALTER TABLE posts ADD COLUMN slot_at INTEGER');
       this.db.exec('UPDATE posts SET slot_at = scheduled_at WHERE slot_at IS NULL');
     }
+    // Migration: independent retry bookkeeping for the image worker and the upload worker.
+    if (!cols.includes('next_try_at')) this.db.exec('ALTER TABLE posts ADD COLUMN next_try_at INTEGER NOT NULL DEFAULT 0');
+    if (!cols.includes('gen_attempts')) this.db.exec('ALTER TABLE posts ADD COLUMN gen_attempts INTEGER NOT NULL DEFAULT 0');
   }
 
   close() { try { this.db.close(); } catch (_) { /* ignore */ } }
@@ -188,30 +194,19 @@ class Store {
       .all(...statuses).map(plain);
   }
 
-  nextDuePost(now) {
+  // Image worker: next post that still needs its image + caption (earliest posting time first).
+  nextToGenerate(now) {
     return plain(this.db.prepare(
-      'SELECT * FROM posts WHERE status = \'scheduled\' AND scheduled_at <= ? ORDER BY scheduled_at ASC LIMIT 1',
+      `SELECT * FROM posts WHERE status = 'scheduled' AND next_try_at <= ? ORDER BY ${SLOT} ASC LIMIT 1`,
     ).get(now));
   }
 
-  // TikTok-based scheduling works strictly one post at a time: a post that failed (error set) is retried until it is
-  // scheduled on TikTok, and no other post is uploaded meanwhile. Returns { post, ready } or null.
-  tiktokQueueHead(now) {
-    const retrying = plain(this.db.prepare(
-      'SELECT * FROM posts WHERE status = \'scheduled\' AND error IS NOT NULL ORDER BY COALESCE(slot_at, scheduled_at) ASC LIMIT 1',
-    ).get());
-    if (retrying) return { post: retrying, ready: retrying.scheduled_at <= now };
-    const next = plain(this.db.prepare(
-      'SELECT * FROM posts WHERE status = \'scheduled\' ORDER BY COALESCE(slot_at, scheduled_at) ASC LIMIT 1',
-    ).get());
-    return next ? { post: next, ready: true } : null;
-  }
-
-  // Next not-yet-generated slot at or after `after` (used to reuse the content of an unconfirmed post).
-  nextEmptySlot(after, excludeId) {
+  // Upload worker: next post with a ready image. TikTok-based: any (scheduled ahead on TikTok); software-based: only
+  // when its posting time has come. A post waiting for its retry time never blocks the others.
+  nextToUpload(now, { onlyDue }) {
     return plain(this.db.prepare(
-      'SELECT * FROM posts WHERE status = \'scheduled\' AND caption IS NULL AND id != ? AND COALESCE(slot_at, scheduled_at) >= ? ORDER BY COALESCE(slot_at, scheduled_at) ASC LIMIT 1',
-    ).get(excludeId || 0, after));
+      `SELECT * FROM posts WHERE status = 'ready' AND next_try_at <= ? ${onlyDue ? `AND ${SLOT} <= ?` : ''} ORDER BY ${SLOT} ASC LIMIT 1`,
+    ).get(...(onlyDue ? [now, now] : [now])));
   }
 
   // Posts scheduled on TikTok whose time has passed are published by TikTok.
@@ -227,10 +222,19 @@ class Store {
     ).get());
   }
 
+  // Next post still to be uploaded (for "next post at" in the dashboard).
   nextScheduledPost() {
-    return plain(this.db.prepare(
-      'SELECT * FROM posts WHERE status = \'scheduled\' ORDER BY scheduled_at ASC LIMIT 1',
+    const row = plain(this.db.prepare(
+      `SELECT *, ${SLOT} AS slot FROM posts WHERE status IN ('scheduled', 'generating', 'ready') ORDER BY ${SLOT} ASC LIMIT 1`,
     ).get());
+    if (row) row.scheduled_at = row.slot;
+    return row;
+  }
+
+  countByStatus() {
+    const out = {};
+    for (const r of this.db.prepare('SELECT status, COUNT(*) AS c FROM posts GROUP BY status').all()) out[r.status] = Number(r.c);
+    return out;
   }
 
   lastPublishActivity() {
@@ -248,13 +252,13 @@ class Store {
     ).run(now, today);
     // ...but a post whose image + caption already exist is never left behind: it becomes one of today's posts.
     this.db.prepare(
-      'UPDATE posts SET day = ?, updated_at = ? WHERE day < ? AND status = \'scheduled\' AND caption IS NOT NULL AND image_path IS NOT NULL',
+      'UPDATE posts SET day = ?, status = \'ready\', updated_at = ? WHERE day < ? AND status IN (\'scheduled\', \'ready\') AND caption IS NOT NULL AND image_path IS NOT NULL',
     ).run(today, now, today);
   }
 
   history(limit = 200) {
     return this.db.prepare(
-      'SELECT id, day, scheduled_at, slot_at, published_at, status, step, title, caption, hashtags, sound_title, sound_evidence, error, attempts, image_path FROM posts '
+      'SELECT id, day, scheduled_at, slot_at, published_at, status, step, title, caption, hashtags, sound_title, sound_evidence, error, attempts, gen_attempts, next_try_at, image_path FROM posts '
       // Published posts and posts already scheduled on TikTok leave the list (they are only counted in the stats).
       + 'WHERE status NOT IN (\'published\', \'tiktok_scheduled\') '
       // Latest activity first; empty future slots (not generated yet) at the end.

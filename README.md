@@ -91,31 +91,43 @@ posting times are the same in both modes, and automation runs continuously until
   *Scheduled on TikTok*; they count as published once their time has passed. The first time, TikTok asks once to allow
   saving posts for scheduled posting – the app confirms that dialog.
 
-## Automatic retries
+## How it works: two independent workers
 
-- If ChatGPT shows an error ("Something went wrong", "Try again", no image), the app immediately asks it to
-  regenerate the image – up to 6 times – instead of waiting. Only a real usage-limit message pauses image creation
-  (re-checked every 30 minutes).
-- A failed post or upload is retried immediately; if it fails again, after 1 minute.
-- Slow internet: pages are opened with automatic retries on network errors, and every step waits for the real result
-  (page loaded, photo uploaded – up to 10 minutes, sound results, image – up to 20 minutes) instead of fixed times.
+The app runs two workers at the same time, each in its own Chrome tab:
+
+| Worker | Does | Post status |
+| --- | --- | --- |
+| **Image generation** | prompt → image → caption/hashtags in ChatGPT or Gemini, saved immediately | Waiting for image → Generating image → Image ready |
+| **TikTok upload** | uploads ready posts and schedules (TikTok-Based) or publishes them (Software-Based) | Uploading to TikTok → Scheduling on TikTok → Successfully scheduled / Published |
+
+- Image generation never waits for TikTok: if TikTok is slow or unavailable, images keep being generated and saved;
+  they are uploaded as soon as TikTok accepts uploads again. A generated image is never generated twice.
+- A failing upload never blocks the queue: each post has its own retry timer (immediately, then 15 s, 30 s, at most
+  1 minute, with a little jitter) while the other posts continue. Uploads go in order of their posting time.
+- The dashboard shows both workers live at the top (what they are doing, real upload percentage when TikTok shows one,
+  queue counts), the statistics below, then settings, prompts and the schedule.
+
+## Automatic retries and slow internet
+
+- If ChatGPT/Gemini shows an error ("Something went wrong", "Try again", no image), the app immediately asks it to
+  regenerate the image – up to 6 times. Only a real usage-limit message pauses **image generation** (uploads continue).
+- Uploads are judged by **activity, not by a fixed time**: while the photo is still uploading (a request in flight or
+  data moving, or TikTok's percentage changing) the app keeps waiting – on a slow connection as long as it takes. Only
+  when nothing at all has moved for 3 minutes is the upload treated as stalled and retried. The tab is never closed
+  while an upload is active.
+- Pages are opened with automatic retries on network errors (reset, timeout, offline).
 
 ## Every generated post reaches TikTok
 
-Each post is tracked step by step (image + caption → upload → scheduled/published → live). After an error or a
-restart the app continues from the last completed step; a generated image is never generated again or left behind.
-
-- TikTok's own response right after clicking Post/Schedule is the confirmation – there are no extra confirmation
-  checks. If TikTok does not confirm, the same post is uploaded again right away – scheduled for its original time if
-  that is still ahead, otherwise published immediately.
+- Progress is saved after every step; after an error or restart the app continues from the last completed step.
+- TikTok's own response right after clicking Post/Schedule is the confirmation. If TikTok does not confirm, the same
+  post is uploaded again right away – for its original time if still ahead, otherwise published immediately. The
+  database's unique caption guard prevents a post from being submitted twice.
 - TikTok-Based mode: a confirmed post shows as "Scheduled on TikTok" and counts as published once its time has passed.
-  Uploads are strictly one at a time – the next post waits until the current one is scheduled on TikTok.
-- Upload/scheduling failures are retried immediately (further retries after 1 minute) until the post is on TikTok. Only a genuine
-  permanent error stops a post (the AI refuses the prompt). Posts of a past day that already have their image are
-  published today instead of being dropped.
+- Only a genuine permanent error stops a post (the AI refuses the prompt); login problems wait for you (Resume).
+  Posts of a past day that already have their image are published today instead of being dropped.
 - The posting schedule shows the latest 5 waiting / in-progress posts with image previews; *Show all* expands the
-  list. Published posts and posts already scheduled on TikTok leave the list and are only counted in the statistics
-  (*Total published*, *Published today*, *Scheduled on TikTok*; *Pending* = still to be uploaded).
+  list. Published posts and posts already scheduled on TikTok are only counted in the statistics.
 
 ## How the music is chosen
 

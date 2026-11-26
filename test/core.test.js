@@ -90,96 +90,9 @@ test('store: duplicate caption cannot be posted twice; stats; recovery-friendly'
   store.close();
 });
 
-test('engine init: interrupted publishing is uploaded again; interrupted generation resumes; old empty slots missed', () => {
-  const { Engine } = require('../src/main/engine');
-  const store = new Store(tmpDb());
-  const yesterday = dayKey(new Date(Date.now() - 86400e3));
-  const old = store.createPost(yesterday, Date.now() - 86400e3);
-  const gen = store.createPost(dayKey(), Date.now() - 1000);
-  const posting = store.createPost(dayKey(), Date.now() - 1000);
-  store.updatePost(gen, { status: 'generating' });
-  store.updatePost(posting, { status: 'posting', caption_key: 'k1' });
-  const log = { info() {}, warn() {}, error() {} };
-  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: {}, log });
-  engine.init();
-  assert.strictEqual(store.getPost(old).status, 'missed');
-  assert.strictEqual(store.getPost(gen).status, 'scheduled');
-  assert.strictEqual(store.getPost(posting).status, 'scheduled');
-  assert.ok(store.getPost(posting).error.includes('uploading again'), 'no confirmation round, straight back into the upload queue');
-  store.close();
-});
-
 test('similarity helper', () => {
   assert.ok(jaccard('morning coffee routine for creators', 'morning coffee routine for busy creators') > 0.6);
   assert.ok(jaccard('ocean waves at night', 'city skyline at noon') < 0.2);
-});
-
-test('TikTok-based queue: earliest slot first, strictly one post at a time while a post is retrying', () => {
-  const store = new Store(tmpDb());
-  const day = dayKey();
-  const now = Date.now();
-  const later = store.createPost(day, now + 5 * 3600e3);
-  const sooner = store.createPost(day, now + 2 * 3600e3);
-  assert.strictEqual(store.tiktokQueueHead(now).post.id, sooner, 'earliest calculated time first');
-  store.updatePost(later, { attempts: 1, error: 'upload failed', scheduled_at: now + 5 * 60e3 });
-  const head = store.tiktokQueueHead(now);
-  assert.strictEqual(head.post.id, later, 'the failing post stays at the front');
-  assert.strictEqual(head.ready, false, 'other uploads wait until its retry time');
-  assert.strictEqual(store.tiktokQueueHead(now + 6 * 60e3).ready, true);
-  assert.strictEqual(store.getPost(later).slot_at, now + 5 * 3600e3, 'a retry keeps the original posting time');
-  store.updatePost(sooner, { status: 'tiktok_scheduled', published_at: now + 2 * 3600e3, caption_key: 'a' });
-  store.updatePost(later, { caption_key: 'a' });
-  assert.throws(() => store.updatePost(later, { status: 'tiktok_scheduled' }), /UNIQUE/, 'same caption cannot be scheduled twice');
-  store.close();
-});
-
-test('recovery: generated posts are never left behind', () => {
-  const { Engine } = require('../src/main/engine');
-  const store = new Store(tmpDb());
-  const log = { info() {}, warn() {}, error() {} };
-  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: {}, log });
-  const now = Date.now();
-  // not confirmed, original time still ahead -> uploaded again for that time
-  const future = store.createPost(dayKey(), now + 3 * 3600e3);
-  store.updatePost(future, { status: 'unverified', caption: 'c1', image_path: __filename });
-  engine.recoverPost(store.getPost(future), 'Not found on TikTok');
-  let p = store.getPost(future);
-  assert.strictEqual(p.status, 'scheduled');
-  assert.strictEqual(p.slot_at, now + 3 * 3600e3);
-  assert.ok(p.error.includes('uploading again'));
-  // original time passed -> becomes today's post (published immediately)
-  const yesterday = dayKey(new Date(now - 86400e3));
-  const past = store.createPost(yesterday, now - 86400e3);
-  store.updatePost(past, { status: 'failed', caption: 'c2', image_path: __filename, error: 'Could not confirm on TikTok after 2 hours' });
-  engine.recoverPost(store.getPost(past), 'Earlier post was never confirmed on TikTok');
-  assert.strictEqual(store.getPost(past).day, dayKey());
-  // past-day slots: generated ones move to today, empty ones are dropped
-  const genOld = store.createPost(yesterday, now - 80000e3);
-  store.updatePost(genOld, { caption: 'c3', image_path: __filename });
-  const emptyOld = store.createPost(yesterday, now - 80000e3);
-  store.markOldScheduledMissed(dayKey());
-  assert.strictEqual(store.getPost(genOld).status, 'scheduled');
-  assert.strictEqual(store.getPost(genOld).day, dayKey());
-  assert.strictEqual(store.getPost(emptyOld).status, 'missed');
-  store.close();
-});
-
-test('failures: recoverable errors keep retrying (image kept), AI refusal is permanent', async () => {
-  const { Engine } = require('../src/main/engine');
-  const { UiError } = require('../src/main/automation/util');
-  const store = new Store(tmpDb());
-  const log = { info() {}, warn() {}, error() {} };
-  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: { screenshots: os.tmpdir() }, log });
-  const id = store.createPost(dayKey(), Date.now());
-  store.updatePost(id, { status: 'uploading', attempts: 12, caption: 'c', image_path: __filename });
-  await engine.handleError(id, new UiError('Could not click TikTok "Post" button'), null, log);
-  let p = store.getPost(id);
-  assert.strictEqual(p.status, 'scheduled', 'still retried after many attempts');
-  assert.strictEqual(p.image_path, __filename, 'generated image is kept, only the upload is repeated');
-  store.updatePost(id, { status: 'generating', attempts: 1 });
-  await engine.handleError(id, new UiError('ChatGPT refused to create the image: policy'), null, log);
-  assert.strictEqual(store.getPost(id).status, 'failed');
-  store.close();
 });
 
 test('TikTok schedule time: 5-minute steps and at least 20 minutes ahead', () => {
@@ -212,22 +125,6 @@ test('TikTok-based mode keeps 10 days scheduled ahead; software mode only today'
   store.close();
 });
 
-test('ChatGPT Free image limit: reset time parsed, all image creation paused, generated posts continue', () => {
-  const { limitResetDelay } = require('../src/main/automation/chatgpt');
-  const { Engine } = require('../src/main/engine');
-  const now = new Date(2026, 10, 26, 14, 10).getTime();
-  const msg = 'There’s not enough usage available on your plan to create images right now, but more will be available after 5:59 PM.';
-  assert.strictEqual(new Date(now + limitResetDelay(msg, now)).getHours(), 18);
-  const store = new Store(tmpDb());
-  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: {}, log: { info() {}, warn() {}, error() {} } });
-  store.setSetting('chatgpt_pause_until', String(Date.now() + 3600e3));
-  assert.ok(engine.chatgptPaused({ caption: null, image_path: null }) > Date.now(), 'post needing an image waits');
-  assert.strictEqual(engine.chatgptPaused({ caption: 'x', image_path: __filename }), 0, 'already generated post continues');
-  store.setSetting('chatgpt_pause_until', String(Date.now() - 1000));
-  assert.strictEqual(engine.chatgptPaused({ caption: null, image_path: null }), 0, 'pause ends by itself');
-  store.close();
-});
-
 test('TikTok schedule timezone is read from TikTok and the time converted into it', () => {
   const { tzOffsetMinutes, wallClock } = require('../src/main/automation/tiktok');
   assert.strictEqual(tzOffsetMinutes('(GMT+5) Local Time'), 300);
@@ -257,28 +154,157 @@ test('published and TikTok-scheduled posts leave the list and are only counted i
   store.close();
 });
 
-test('slow internet: page opening retries network errors; failed attempts retry immediately, then after 1 minute', async () => {
-  const { gotoSafe } = require('../src/main/automation/util');
+// ---------- two independent workers (image generation / TikTok upload) ----------
+const quietLog = { info() {}, warn() {}, error() {} };
+const makeEngine = (store) => {
+  const { Engine } = require('../src/main/engine');
+  return new Engine({ store, chrome: { isConnected: () => false, closePage: async () => {} }, dirs: { screenshots: os.tmpdir(), media: os.tmpdir() }, log: quietLog });
+};
+
+test('init: every post continues from its last completed step', () => {
+  const store = new Store(tmpDb());
+  const now = Date.now();
+  const yesterday = dayKey(new Date(now - 86400e3));
+  const oldEmpty = store.createPost(yesterday, now - 86400e3);
+  const gen = store.createPost(dayKey(), now + 3600e3);
+  const up = store.createPost(dayKey(), now + 3600e3);
+  const posting = store.createPost(dayKey(), now + 7200e3);
+  const legacy = store.createPost(dayKey(), now + 9000e3);
+  store.updatePost(gen, { status: 'generating' });
+  store.updatePost(up, { status: 'uploading', caption: 'a', image_path: __filename });
+  store.updatePost(posting, { status: 'posting', caption: 'b', image_path: __filename, caption_key: 'k1' });
+  store.updatePost(legacy, { caption: 'c', image_path: __filename });
+  makeEngine(store).init();
+  assert.strictEqual(store.getPost(oldEmpty).status, 'missed');
+  assert.strictEqual(store.getPost(gen).status, 'scheduled', 'generation restarts');
+  assert.strictEqual(store.getPost(up).status, 'ready', 'image kept, upload restarts');
+  assert.strictEqual(store.getPost(posting).status, 'ready', 'interrupted publishing is uploaded again');
+  assert.strictEqual(store.getPost(legacy).status, 'ready', 'an existing image is never generated again');
+  store.close();
+});
+
+test('workers have independent queues; a retrying post never blocks the others', () => {
+  const store = new Store(tmpDb());
+  const now = Date.now();
+  const day = dayKey();
+  const a = store.createPost(day, now + 3600e3);
+  const b = store.createPost(day, now + 7200e3);
+  const c = store.createPost(day, now + 9000e3);
+  store.updatePost(a, { status: 'ready', caption: 'a', image_path: __filename, next_try_at: now + 60000, error: 'upload failed' });
+  store.updatePost(b, { status: 'ready', caption: 'b', image_path: __filename });
+  assert.strictEqual(store.nextToGenerate(now).id, c, 'image worker only takes posts without an image');
+  assert.strictEqual(store.nextToUpload(now, { onlyDue: false }).id, b, 'post a is waiting for its retry time - post b goes ahead');
+  assert.strictEqual(store.nextToUpload(now + 61000, { onlyDue: false }).id, a, 'post a is retried after its delay (earliest time first)');
+  assert.strictEqual(store.nextToUpload(now, { onlyDue: true }), null, 'software mode: not before the posting time');
+  assert.strictEqual(store.getPost(a).slot_at, now + 3600e3, 'retries never change the posting time');
+  store.close();
+});
+
+test('upload failures retry on their own timer (image kept); generation limits never stop uploads', async () => {
+  const { UiError, RateLimitError } = require('../src/main/automation/util');
+  const store = new Store(tmpDb());
+  const engine = makeEngine(store);
+  const id = store.createPost(dayKey(), Date.now() + 3600e3);
+  store.updatePost(id, { status: 'uploading', attempts: 1, caption: 'c', image_path: __filename });
+  await engine.handleError('upload', id, new UiError('Uploading image to TikTok: connection stalled'), null, quietLog);
+  let p = store.getPost(id);
+  assert.strictEqual(p.status, 'ready');
+  assert.strictEqual(p.image_path, __filename, 'generated image is kept, only the upload is repeated');
+  assert.ok(p.next_try_at - Date.now() < 2000, 'first retry immediately');
+  store.updatePost(id, { status: 'uploading', attempts: 6 });
+  await engine.handleError('upload', id, new UiError('stalled'), null, quietLog);
+  p = store.getPost(id);
+  assert.ok(p.next_try_at - Date.now() <= 61000, 'never waits more than about 1 minute');
+
+  const g = store.createPost(dayKey(), Date.now() + 7200e3);
+  store.updatePost(g, { status: 'generating', gen_attempts: 1 });
+  await engine.handleError('gen', g, new RateLimitError('ChatGPT image/usage limit reached', 3600e3), null, quietLog);
+  assert.strictEqual(store.getPost(g).status, 'scheduled');
+  assert.ok(engine.providerPausedUntil() > Date.now(), 'image generation pauses for the limit');
+  assert.strictEqual(store.nextToUpload(Date.now() + 61000, { onlyDue: false }).id, id, 'uploads continue during the image limit');
+
+  const r = store.createPost(dayKey(), Date.now() + 9000e3);
+  store.updatePost(r, { status: 'generating', gen_attempts: 1 });
+  await engine.handleError('gen', r, new UiError('ChatGPT refused to create the image: policy'), null, quietLog);
+  assert.strictEqual(store.getPost(r).status, 'failed', 'a refused prompt is a genuine permanent error');
+  store.close();
+});
+
+test('recovery: not confirmed -> uploaded again (original time if ahead, otherwise published now)', () => {
+  const store = new Store(tmpDb());
+  const engine = makeEngine(store);
+  const now = Date.now();
+  const future = store.createPost(dayKey(), now + 3 * 3600e3);
+  store.updatePost(future, { status: 'posting', caption: 'c1', image_path: __filename });
+  engine.recoverPost(store.getPost(future), 'Not confirmed by TikTok');
+  assert.strictEqual(store.getPost(future).status, 'ready');
+  assert.strictEqual(store.getPost(future).slot_at, now + 3 * 3600e3);
+  const yesterday = dayKey(new Date(now - 86400e3));
+  const past = store.createPost(yesterday, now - 86400e3);
+  store.updatePost(past, { status: 'failed', caption: 'c2', image_path: __filename, error: 'Could not confirm on TikTok after 2 hours' });
+  engine.recoverPost(store.getPost(past), 'Earlier post was never confirmed on TikTok');
+  assert.strictEqual(store.getPost(past).day, dayKey());
+  store.close();
+});
+
+test('retry timing: immediately, then 15 s, 30 s, never more than 1 minute', () => {
+  const { retryDelayMs } = require('../src/main/engine');
+  assert.strictEqual(retryDelayMs(1), 0);
+  assert.ok(retryDelayMs(2) >= 12000 && retryDelayMs(2) <= 18000);
+  assert.ok(retryDelayMs(3) >= 25000 && retryDelayMs(3) <= 35000);
+  for (let n = 4; n < 20; n++) assert.ok(retryDelayMs(n) <= 60000);
+});
+
+test('slow internet: pages open despite network errors; uploads wait while active and fail only when stalled', async () => {
+  const { gotoSafe, waitActive } = require('../src/main/automation/util');
   let calls = 0;
-  const fakePage = { goto: async () => { calls++; if (calls < 3) throw new Error('page.goto: net::ERR_CONNECTION_RESET at https://x'); } };
   const realSetTimeout = global.setTimeout;
-  global.setTimeout = (fn) => realSetTimeout(fn, 0); // skip the waits in the test
-  try { await gotoSafe(fakePage, 'https://x'); } finally { global.setTimeout = realSetTimeout; }
+  global.setTimeout = (fn) => realSetTimeout(fn, 0); // skip waits in the test
+  try {
+    await gotoSafe({ goto: async () => { calls++; if (calls < 3) throw new Error('page.goto: net::ERR_CONNECTION_RESET'); } }, 'https://x');
+  } finally { global.setTimeout = realSetTimeout; }
   assert.strictEqual(calls, 3, 'opened on the third try');
 
+  const fakePage = {
+    isClosed: () => false,
+    evaluate: async () => null,
+    title: async () => '',
+    url: () => 'https://www.tiktok.com/tiktokstudio/upload',
+    locator: () => ({ first: () => ({ isVisible: async () => false }) }),
+  };
+  // Active upload (a request in flight) for ~2.5 s with a 1 s idle timeout: must NOT fail, finishes when done.
+  const busy = { inflight: 1, idleFor() { return this.inflight ? 0 : 5000; }, touch() {} };
+  let done = false;
+  realSetTimeout(() => { done = true; }, 2500);
+  await waitActive(fakePage, busy, () => done, { idleTimeout: 1000, label: 'Uploading image to TikTok' });
+  assert.ok(done, 'kept waiting while the upload was active');
+  // Nothing moving at all: reported as stalled.
+  const stalled = { idleFor: () => 5000, touch() {} };
+  await assert.rejects(waitActive(fakePage, stalled, () => false, { idleTimeout: 1000, label: 'Uploading image to TikTok' }), /no upload activity/);
+});
+
+
+test('image generation and TikTok upload run at the same time (one never waits for the other)', async () => {
   const { Engine } = require('../src/main/engine');
-  const { UiError } = require('../src/main/automation/util');
   const store = new Store(tmpDb());
-  const engine = new Engine({ store, chrome: { isConnected: () => false }, dirs: { screenshots: os.tmpdir() }, log: { info() {}, warn() {}, error() {} } });
-  const id = store.createPost(dayKey(), Date.now());
-  store.updatePost(id, { status: 'uploading', attempts: 4, caption: 'c', image_path: __filename });
-  const before = Date.now();
-  await engine.handleError(id, new UiError('Timed out waiting for TikTok upload page'), null, engine.log);
-  const wait = store.getPost(id).scheduled_at - before;
-  assert.ok(wait >= 59000 && wait <= 65000, `later retries after 1 minute (got ${Math.round(wait / 1000)} s)`);
-  store.updatePost(id, { status: 'uploading', attempts: 1 });
-  const before2 = Date.now();
-  await engine.handleError(id, new UiError('Timed out waiting for TikTok upload page'), null, engine.log);
-  assert.ok(store.getPost(id).scheduled_at - before2 < 3000, 'first retry immediately');
+  store.addPrompt('p');
+  store.setSetting('daily_quantity', '3');
+  store.setSetting('running', '1');
+  const engine = new Engine({ store, chrome: { isConnected: () => true, closePage: async () => {} }, dirs: {}, log: quietLog });
+  const now = Date.now();
+  store.createPost(dayKey(), now + 3600e3); // needs an image
+  const ready = store.createPost(dayKey(), now + 7200e3);
+  store.updatePost(ready, { status: 'ready', caption: 'c', image_path: __filename });
+  store.setSetting('scheduling_mode', 'tiktok');
+  let overlap = false;
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  engine.generateOne = async () => { await wait(300); };
+  engine.uploadOne = async () => { overlap = overlap || engine.workers.gen.busy; await wait(300); };
+  const g = engine.runGenWorker();
+  const u = engine.runUploadWorker();
+  await Promise.all([g, u]);
+  store.setSetting('running', '0'); // stop follow-up runs
+  assert.ok(overlap, 'upload ran while the image worker was busy');
+  await wait(600);
   store.close();
 });
