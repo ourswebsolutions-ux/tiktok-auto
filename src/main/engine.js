@@ -36,6 +36,10 @@ function retryDelayMs(attempt) {
 }
 // TikTok-based mode keeps this many days scheduled ahead (TikTok allows scheduling up to 10 days ahead).
 const TIKTOK_DAYS_AHEAD = 10;
+// TikTok accepts at most this many scheduled posts at a time.
+const TIKTOK_SCHEDULE_LIMIT = 30;
+// Continuous generation plans new days ahead of time - at most this far (safety cap for disk space).
+const MAX_QUEUE_DAYS = 365;
 const BROWSER_GONE_RE = /Target (page, context or browser )?(has been )?closed|Browser has been closed|browser has disconnected|has been disconnected|Connection closed|WebSocket is not open/i;
 
 const newWorker = (name) => ({ name, busy: false, state: 'idle', text: '', postId: null, attention: null });
@@ -50,12 +54,19 @@ class Engine extends EventEmitter {
     this.notify = notify || (() => {});
     this.timer = null;
     this.ticking = false;
-    this.abortRequested = false;
+    this.abort = { gen: false, upload: false };
     this.workers = { gen: newWorker('Image generation'), upload: newWorker('TikTok upload') };
     this.status = { phase: 'stopped', step: '', message: '', instructions: '' };
   }
 
-  get running() { return this.store.getSetting('running', '0') === '1'; }
+  // Two independent switches: "Generate images" and "Auto upload to TikTok". Automation runs while either is on.
+  genEnabled() { return this.store.getSetting('gen_enabled', this.store.getSetting('running', '0')) === '1'; }
+
+  uploadEnabled() { return this.store.getSetting('upload_enabled', this.store.getSetting('running', '0')) === '1'; }
+
+  get running() { return this.genEnabled() || this.uploadEnabled(); }
+
+  workerEnabled(key) { return key === 'gen' ? this.genEnabled() : this.uploadEnabled(); }
 
   get busy() { return this.workers.gen.busy || this.workers.upload.busy; }
 
@@ -92,17 +103,50 @@ class Engine extends EventEmitter {
     }
   }
 
+  // Legacy "Start" (tray / restart): both switches on. resume = restart after reboot with the saved switches.
   async start({ resume = false } = {}) {
-    if (!this.store.listPrompts().length) return { ok: false, message: 'Add at least one prompt first.' };
-    if (this.dailyQuantity() < 1) return { ok: false, message: 'Set the number of posts per day first.' };
-    this.store.setSetting('running', '1');
-    this.abortRequested = false;
     if (!resume) {
-      // Fresh start: re-plan today's not-yet-generated slots.
-      for (const p of this.store.postsForDay(dayKey())) {
-        if (p.status === 'scheduled' && !p.idea) this.store.deletePost(p.id);
-      }
+      const g = await this.setGenerate(true);
+      if (!g.ok) return g;
+      return this.setUpload(true);
     }
+    return this.startLoop();
+  }
+
+  stop() {
+    this.store.setSetting('gen_enabled', '0');
+    this.store.setSetting('upload_enabled', '0');
+    this.abort.gen = true;
+    this.abort.upload = true;
+    this.stopLoopIfIdle();
+  }
+
+  async setGenerate(on) {
+    if (on) {
+      if (!this.store.listPrompts().length) return { ok: false, message: 'Add at least one prompt first.' };
+      if (this.dailyQuantity() < 1) return { ok: false, message: 'Set the number of posts per day first.' };
+    }
+    this.store.setSetting('gen_enabled', on ? '1' : '0');
+    this.abort.gen = !on; // OFF: stops the current generation and all retries right away
+    this.log.info(`Generate images: ${on ? 'ON' : 'OFF'}`);
+    if (!on) { this.stopLoopIfIdle(); this.setWorker('gen', { state: 'idle', text: '', postId: null }); return { ok: true }; }
+    return this.startLoop();
+  }
+
+  async setUpload(on) {
+    if (on && this.dailyQuantity() < 1) return { ok: false, message: 'Set the number of posts per day first.' };
+    this.store.setSetting('upload_enabled', on ? '1' : '0');
+    this.abort.upload = !on; // OFF: no new uploads; an upload already being published is finished safely
+    this.log.info(`Auto upload to TikTok: ${on ? 'ON' : 'OFF'}`);
+    if (!on) { this.stopLoopIfIdle(); this.setWorker('upload', { state: 'idle', text: '', postId: null }); return { ok: true }; }
+    return this.startLoop();
+  }
+
+  async startLoop() {
+    this.store.setSetting('running', this.running ? '1' : '0');
+    if (!this.running) return { ok: true };
+    if (this.genEnabled()) this.abort.gen = false;
+    if (this.uploadEnabled()) this.abort.upload = false;
     this.ensureSchedule();
     if (!this.timer) this.timer = setInterval(() => this.tick(), TICK_MS);
     if (!this.chrome.isConnected()) {
@@ -115,9 +159,10 @@ class Engine extends EventEmitter {
     return conn ? { ok: true } : { ok: false, message: this.status.message, instructions: INSTRUCTIONS, started: true };
   }
 
-  stop() {
-    this.store.setSetting('running', '0');
-    this.abortRequested = true;
+  // Both switches off: pause all automation (current steps finish/abort safely).
+  stopLoopIfIdle() {
+    this.store.setSetting('running', this.running ? '1' : '0');
+    if (this.running) { this.emit('change'); return; }
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     this.clearAttention();
     this.setStatus({ phase: this.busy ? 'stopping' : 'stopped', step: this.busy ? 'Stopping after the current step...' : '', message: '', instructions: '' });
@@ -274,7 +319,7 @@ class Engine extends EventEmitter {
   // Common worker wrapper: one job at a time per worker, then immediately looks for the next one.
   async runWorker(key, pick, job) {
     const w = this.workers[key];
-    if (w.busy || !this.running || !this.chrome.isConnected()) return;
+    if (w.busy || !this.workerEnabled(key) || !this.chrome.isConnected()) return;
     w.busy = true;
     let didWork = false;
     try {
@@ -296,7 +341,7 @@ class Engine extends EventEmitter {
       if (!this.running && !this.busy && this.status.phase === 'stopping') this.setStatus({ phase: 'stopped', step: '' });
       this.emit('change');
       // Continue right away with the next post - no idle time between posts.
-      if (didWork && this.running) setTimeout(() => (key === 'gen' ? this.runGenWorker() : this.runUploadWorker()), 500);
+      if (didWork && this.workerEnabled(key)) setTimeout(() => (key === 'gen' ? this.runGenWorker() : this.runUploadWorker()), 500);
     }
   }
 
@@ -313,10 +358,12 @@ class Engine extends EventEmitter {
         this.setWorker('gen', { state: 'paused', postId: null, text: `${this.ai().name} image limit reached - continues automatically at ${new Date(until).toTimeString().slice(0, 5)}` });
         return null;
       }
-      const post = this.store.nextToGenerate(Date.now());
+      let post = this.store.nextToGenerate(Date.now());
+      // Continuous generation: when every planned post has its image, plan the next day and keep going.
+      if (!post && !this.store.countByStatus().scheduled && this.planNextDay()) post = this.store.nextToGenerate(Date.now());
       if (!post) {
         const waiting = this.store.countByStatus().scheduled || 0;
-        this.setWorker('gen', { state: 'idle', postId: null, text: waiting ? `Retrying shortly (${waiting} waiting for an image)` : 'All planned posts have their image' });
+        this.setWorker('gen', { state: 'idle', postId: null, text: waiting ? `Retrying shortly (${waiting} waiting for an image)` : `Queue is full (${MAX_QUEUE_DAYS} days ahead)` });
       }
       return post;
     }, (post) => this.generateOne(post));
@@ -355,7 +402,7 @@ class Engine extends EventEmitter {
         isDuplicateImage: (buf) => this.store.imageHashUsed(sha256(buf), id),
         fileBase: path.join(this.dirs.media, `post-${id}-${Date.now()}`),
         log,
-        shouldAbort: () => this.abortRequested,
+        shouldAbort: () => this.abort.gen,
       });
       // Saved immediately: from here on this image is never generated again.
       this.store.updatePost(id, {
@@ -365,6 +412,7 @@ class Engine extends EventEmitter {
         status: 'ready', next_try_at: 0, error: null, step: 'Image generated - waiting for upload',
       });
       log.info(`Image generated and saved: ${c.image.file}`);
+      this.exportPost(id);
       setTimeout(() => this.runUploadWorker(), 200);
     } catch (e) {
       keepPage = await this.handleError('gen', id, e, page, log);
@@ -380,7 +428,16 @@ class Engine extends EventEmitter {
     return this.runWorker('upload', () => {
       const now = Date.now();
       const tiktokMode = this.schedulingMode() === 'tiktok';
-      const post = this.store.nextToUpload(now, { onlyDue: !tiktokMode });
+      if (tiktokMode) {
+        const used = this.store.countFutureTikTokScheduled(now);
+        if (used >= TIKTOK_SCHEDULE_LIMIT) {
+          this.setWorker('upload', { state: 'waiting', postId: null, text: `TikTok limit reached (${used}/${TIKTOK_SCHEDULE_LIMIT} scheduled) - continues when a scheduled post goes live` });
+          return null;
+        }
+      }
+      // TikTok-based: within TikTok's scheduling window (10 days); software-based: when the posting time has come.
+      const maxSlot = tiktokMode ? now + TIKTOK_DAYS_AHEAD * 86400e3 - 3600e3 : now;
+      const post = this.store.nextToUpload(now, { maxSlot });
       if (!post) {
         const next = this.store.nextScheduledPost();
         const ready = this.store.countByStatus().ready || 0;
@@ -434,7 +491,7 @@ class Engine extends EventEmitter {
       if (this.schedulingMode() === 'tiktok' && !scheduleAt) log.info('Original time has passed - publishing now instead of scheduling in the past.');
       const res = await tiktok.publishPhotoPost(page, p, {
         log,
-        shouldAbort: () => this.abortRequested,
+        shouldAbort: () => this.abort.upload,
         recentSounds,
         onProgress: step,
         scheduleAt,
@@ -523,13 +580,6 @@ class Engine extends EventEmitter {
       this.notify(`${this.ai().name} image limit reached`, `Image generation continues automatically at ${new Date(now + e.retryAfterMs).toTimeString().slice(0, 5)}.`);
       return false;
     }
-    // Genuine permanent error: the AI refuses this prompt - retrying the same prompt cannot succeed.
-    if (gen && /refused to create the image/i.test(e.message)) {
-      this.store.updatePost(id, { status: 'failed', error: msg, step: '' });
-      log.error(`FAILED: ${msg}`);
-      this.notify('TikTok post failed', msg.slice(0, 180));
-      return false;
-    }
     // Recoverable: retried on its own timer (at once, then 15 s, 30 s, max 1 min); other posts continue meanwhile.
     const delay = retryDelayMs(attempts);
     this.store.updatePost(id, { status: back, next_try_at: now + delay, error: msg });
@@ -546,6 +596,45 @@ class Engine extends EventEmitter {
     this.store.updatePost(post.id, fields);
     this.log.warn(`[post ${post.id}] ${reason} - uploading it to TikTok again (${slot > Date.now() ? 'scheduled for its original time' : 'published now, its time has passed'}).`);
     this.emit('change');
+  }
+
+  // Continuous generation: adds the next not-yet-planned day (after the last planned one) to the queue.
+  planNextDay() {
+    const now = Date.now();
+    const last = this.store.lastPlannedDay();
+    const base = last ? new Date(`${last}T12:00:00`) : new Date(now);
+    if (last) base.setDate(base.getDate() + 1);
+    if (base.getTime() - now > MAX_QUEUE_DAYS * 86400e3) return false;
+    const day = dayKey(base);
+    const posts = this.store.postsForDay(day);
+    const active = posts.filter((p) => ACTIVE_STATUSES.includes(p.status));
+    const plan = planDay({ day, target: this.dailyQuantity(), existingActive: active, totalAttempts: posts.length, now });
+    for (const t of plan.add) this.store.createPost(day, t);
+    if (plan.add.length) this.log.info(`Queue: planned ${plan.add.length} posts for ${day} (continuous generation).`);
+    return plan.add.length > 0;
+  }
+
+  // Saves every generated post to the Export folder: image + caption, hashtags, posting date and other data.
+  exportPost(id) {
+    if (!this.dirs.export) return;
+    try {
+      const p = this.store.getPost(id);
+      fs.mkdirSync(this.dirs.export, { recursive: true });
+      const when = new Date(p.slot_at || p.scheduled_at);
+      const stamp = `${dayKey(when)}_${String(when.getHours()).padStart(2, '0')}${String(when.getMinutes()).padStart(2, '0')}`;
+      const base = path.join(this.dirs.export, `${stamp}_post-${id}`);
+      fs.copyFileSync(p.image_path, `${base}${path.extname(p.image_path)}`);
+      const hashtags = p.hashtags ? JSON.parse(p.hashtags) : [];
+      const data = {
+        id, postingDate: when.toISOString(), postingDateLocal: when.toLocaleString(), title: p.title, caption: p.caption, hashtags,
+        idea: p.idea, prompt: p.prompt_text, musicKeywords: p.music_keywords ? JSON.parse(p.music_keywords) : [],
+        image: path.basename(`${base}${path.extname(p.image_path)}`), generatedAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(`${base}.json`, JSON.stringify(data, null, 2));
+      fs.writeFileSync(`${base}.txt`, `${p.title || ''}\n\n${p.caption}\n\n${hashtags.join(' ')}\n\nPosting date: ${when.toLocaleString()}\n`);
+    } catch (e) {
+      this.log.warn(`[post ${id}] Export failed: ${e.message}`);
+    }
   }
 
   duplicateReason(c, recent, postId) {
@@ -573,6 +662,16 @@ class Engine extends EventEmitter {
       status: { ...this.status, nextPostAt: next ? next.scheduled_at : null, chromeConnected: this.chrome.isConnected() },
       workers: { gen: worker(this.workers.gen), upload: worker(this.workers.upload) },
       queue: { waitingForImage: counts.scheduled || 0, generating: counts.generating || 0, ready: counts.ready || 0, uploading: (counts.uploading || 0) + (counts.posting || 0) },
+      switches: { generate: this.genEnabled(), upload: this.uploadEnabled() },
+      overview: {
+        imagesGenerated: this.store.countImagesGenerated(),
+        pendingUpload: counts.ready || 0,
+        scheduledOnTikTok: this.store.countFutureTikTokScheduled(Date.now()),
+        published: this.store.stats(today).totalPublished,
+        publishedToday: this.store.stats(today).todayPublished,
+        limit: TIKTOK_SCHEDULE_LIMIT,
+      },
+      exportDir: this.dirs.export || null,
       dailyQuantity: this.dailyQuantity(),
       schedulingMode: this.schedulingMode(),
       aiProvider: this.aiProvider(),

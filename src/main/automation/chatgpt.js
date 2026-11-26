@@ -34,7 +34,6 @@ function limitResetDelay(text, now = Date.now()) {
 }
 // ChatGPT-side glitches that should simply be regenerated.
 const TRANSIENT_RE = /something went wrong|an error occurred|error (while )?(generating|creating)|network error|(please )?try again|couldn['’]t (generate|create|finish)|failed to (generate|create)|unable to (generate|create) (the |an |your )?image|too many requests|timed out|is taking longer/i;
-const REFUSAL_RE = /(i can['’]t|i cannot|i['’]m unable to|i am unable to|unable to) (help|create|generate|make|fulfill)|violates? (our|the) (content )?polic/i;
 
 async function ensureLoggedIn(page) {
   const loginBtn = page.getByRole('button', { name: /^log in$/i }).or(page.getByRole('link', { name: /^log in$/i }));
@@ -156,7 +155,7 @@ async function ask(page, text, { timeout = 600000, expectImage = false, imageRea
       return t.state === 'in_progress' || !t.retryButton || (await visible(page.locator(STOP)));
     }, { timeout: 60000, label: 'ChatGPT to restart the answer', site: 'ChatGPT', shouldAbort }).catch(() => {});
   } else {
-    await typeIntoComposer(page, text === null ? 'Please regenerate the image now, following my instructions above exactly.' : text);
+    await typeIntoComposer(page, text === null ? FORCE_IMAGE_MESSAGE : text);
     const send = page.locator(SEND).filter({ visible: true }).first();
     if (await visible(send)) {
       await waitUntil(page, () => send.isEnabled(), { timeout: 30000, label: 'ChatGPT send button', site: 'ChatGPT' });
@@ -340,16 +339,18 @@ function saveImage(best, fileBase) {
  *  2. in the same chat asks for title, caption, hashtags and music keywords that match that image.
  * `isDuplicate(details)` returns a reason when the post repeats earlier ones; `isDuplicateImage(buffer)` for images.
  */
+// Sent when the AI answers with text (or fails) instead of an image.
+const FORCE_IMAGE_MESSAGE = 'Please generate the image anyway. Generate the actual image NOW. Do not provide explanations, suggestions, or text. I need the actual image output. Try again using a new original creative concept.';
+
 async function generatePostWith(d, page, { userPrompt, recent, isDuplicate, isDuplicateImage, fileBase, log, shouldAbort }) {
   await d.openChat(page, { shouldAbort });
   let img = null;
   let lastProblem = '';
-  let refusals = 0;
   let retryButton = false;
   for (let attempt = 0; attempt < 6 && !img; attempt++) {
     // First the prompt exactly as written. If no image comes back: regenerate - with ChatGPT's own Retry button
     // when it shows one, otherwise by asking for it - and check again whether an image was created.
-    const message = attempt === 0 ? userPrompt : (retryButton ? null : 'Please regenerate the image now, following my instructions above exactly.');
+    const message = attempt === 0 ? userPrompt : (retryButton ? null : FORCE_IMAGE_MESSAGE);
     if (attempt === 0) log.info(`Sending your prompt to ${d.name} exactly as written`);
     else log.warn(`No image (${lastProblem || 'no image in the reply'}) - ${retryButton ? `pressing ${d.name} Retry` : `asking ${d.name} to regenerate the image`} (attempt ${attempt + 1}/6)`);
     if (attempt > 0) {
@@ -370,10 +371,9 @@ async function generatePostWith(d, page, { userPrompt, recent, isDuplicate, isDu
       } else {
         img = r.image;
       }
-    } else if (!r.error && REFUSAL_RE.test(r.text) && !TRANSIENT_RE.test(r.text) && ++refusals >= 2) {
-      // A real content-policy refusal twice in a row: regenerating again will not help.
-      throw new UiError(`${d.name} refused to create the image: ${r.text.replace(/\s+/g, ' ').slice(0, 200)}`);
     }
+    // No image (text answer, refusal or error): the next round asks for the actual image with a new concept.
+    // Only a real image file counts - text is never saved as an image.
   }
   if (!img) throw new UiError(`${d.name} did not create an image after 6 tries (${lastProblem})`);
   let saved = saveImage(img, fileBase);
@@ -415,4 +415,4 @@ async function generatePostWith(d, page, { userPrompt, recent, isDuplicate, isDu
 const CHATGPT_DRIVER = { name: 'ChatGPT', openChat, sendAndCaptureImage, ask };
 const generatePost = (page, opts) => generatePostWith(CHATGPT_DRIVER, page, opts);
 
-module.exports = { generatePostWith, saveImage, limitResetDelay, checkChatGPT, openChat, generatePost, extractJson, normalizeContent, buildDetailsPrompt, imageType, imageSize };
+module.exports = { FORCE_IMAGE_MESSAGE, generatePostWith, saveImage, limitResetDelay, checkChatGPT, openChat, generatePost, extractJson, normalizeContent, buildDetailsPrompt, imageType, imageSize };

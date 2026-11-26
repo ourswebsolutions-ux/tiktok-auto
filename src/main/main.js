@@ -4,7 +4,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, nativeImage, shell } = require('electron');
 const { Store } = require('./db');
 const { Engine } = require('./engine');
 const { ChromeConnection } = require('./automation/chrome');
@@ -62,8 +62,9 @@ if (!app.requestSingleInstanceLock()) {
       { label: `Version ${app.getVersion()}${updater && updater.state.status === 'ready' ? ` (update ${updater.state.version} ready)` : ''}`, enabled: false },
       { type: 'separator' },
       { label: 'Open Dashboard', click: showWindow },
-      { label: 'Start Automation', enabled: !running, click: () => engine.start() },
-      { label: 'Stop Automation', enabled: running, click: () => engine.stop() },
+      { label: 'Generate images', type: 'checkbox', checked: engine.genEnabled(), click: (item) => engine.setGenerate(item.checked) },
+      { label: 'Auto upload to TikTok', type: 'checkbox', checked: engine.uploadEnabled(), click: (item) => engine.setUpload(item.checked) },
+      { label: 'Stop everything', enabled: running, click: () => engine.stop() },
       { label: 'Check for Updates', enabled: !!(updater && app.isPackaged), click: () => updater.check() },
       { type: 'separator' },
       { label: 'Quit (stops automation)', click: () => { quitting = true; app.quit(); } },
@@ -81,6 +82,8 @@ if (!app.requestSingleInstanceLock()) {
       media: path.join(userData, 'media'),
       screenshots: path.join(userData, 'screenshots'),
       logs: path.join(userData, 'logs'),
+      // Every generated post (image + caption/hashtags/date) is also saved here for the user.
+      export: path.join(app.getPath('documents'), 'TikTok Auto Poster Export'),
     };
     Object.values(dirs).forEach((d) => fs.mkdirSync(d, { recursive: true }));
     const log = createLogger(dirs.logs);
@@ -119,6 +122,9 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('sound:set', (_e, v) => { engine.setSoundStyle(v); return { ok: true, value: engine.soundStyle() }; });
     ipcMain.handle('ai:set', (_e, p) => { engine.setAiProvider(p); return { ok: true, value: engine.aiProvider() }; });
     ipcMain.handle('mode:set', (_e, mode) => { engine.setSchedulingMode(mode); return { ok: true, value: engine.schedulingMode() }; });
+    ipcMain.handle('generate:set', (_e, on) => engine.setGenerate(!!on));
+    ipcMain.handle('upload:set', (_e, on) => engine.setUpload(!!on));
+    ipcMain.handle('export:open', async () => { fs.mkdirSync(dirs.export, { recursive: true }); const err = await shell.openPath(dirs.export); return { ok: !err, message: err }; });
     ipcMain.handle('automation:start', () => engine.start());
     ipcMain.handle('automation:stop', () => { engine.stop(); return { ok: true }; });
     ipcMain.handle('automation:resume', () => { engine.resumeAfterAttention(); return { ok: true }; });

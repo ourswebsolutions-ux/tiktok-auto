@@ -91,6 +91,30 @@ posting times are the same in both modes, and automation runs continuously until
   *Scheduled on TikTok*; they count as published once their time has passed. The first time, TikTok asks once to allow
   saving posts for scheduled posting – the app confirms that dialog.
 
+## Two switches: Generate images / Auto upload to TikTok
+
+| Generate images | Auto upload to TikTok | Result |
+| --- | --- | --- |
+| ON | OFF | Images + captions are generated and saved only (nothing goes to TikTok) |
+| ON | ON | Generated and uploaded/scheduled automatically |
+| OFF | ON | Only already generated, pending posts are uploaded |
+| OFF | OFF | All automation paused |
+
+- **Continuous generation:** with *Generate images* ON the app keeps creating new, unique posts 24/7 – when every
+  planned post has its image it plans the next day and continues (safety cap: 1 year ahead). It never waits for
+  TikTok and is not affected by TikTok's limit. Turning it OFF stops generation and retries immediately; turning it
+  ON again continues with the existing queue.
+- **Export folder:** every generated post is saved to *Documents/TikTok Auto Poster Export* – the image plus a
+  `.txt` and `.json` with title, caption, hashtags, posting date and prompt (*Open export folder* on the dashboard).
+- **TikTok limit:** in TikTok-Based mode at most **30** posts are scheduled on TikTok at a time (and only within
+  TikTok's 10-day window). When a scheduled post goes live a slot frees up and the next post is uploaded automatically.
+- **No image from ChatGPT:** if it answers with text or fails, the app sends: *"Please generate the image anyway.
+  Generate the actual image NOW. Do not provide explanations, suggestions, or text. I need the actual image output.
+  Try again using a new original creative concept."* – and keeps retrying (with short pauses) until a real image file
+  is received or Generate is switched OFF. Text is never saved as an image.
+- Status cards: *Images generated*, *Posts pending upload*, *Posts scheduled on TikTok*, *Posts published*,
+  *Upload limit* (x/30).
+
 ## How it works: two independent workers
 
 The app runs two workers at the same time, each in its own Chrome tab:

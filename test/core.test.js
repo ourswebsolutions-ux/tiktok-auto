@@ -193,9 +193,9 @@ test('workers have independent queues; a retrying post never blocks the others',
   store.updatePost(a, { status: 'ready', caption: 'a', image_path: __filename, next_try_at: now + 60000, error: 'upload failed' });
   store.updatePost(b, { status: 'ready', caption: 'b', image_path: __filename });
   assert.strictEqual(store.nextToGenerate(now).id, c, 'image worker only takes posts without an image');
-  assert.strictEqual(store.nextToUpload(now, { onlyDue: false }).id, b, 'post a is waiting for its retry time - post b goes ahead');
-  assert.strictEqual(store.nextToUpload(now + 61000, { onlyDue: false }).id, a, 'post a is retried after its delay (earliest time first)');
-  assert.strictEqual(store.nextToUpload(now, { onlyDue: true }), null, 'software mode: not before the posting time');
+  assert.strictEqual(store.nextToUpload(now, { maxSlot: now + 10 * 86400e3 }).id, b, 'post a is waiting for its retry time - post b goes ahead');
+  assert.strictEqual(store.nextToUpload(now + 61000, { maxSlot: now + 10 * 86400e3 }).id, a, 'post a is retried after its delay (earliest time first)');
+  assert.strictEqual(store.nextToUpload(now, { maxSlot: now }), null, 'software mode: not before the posting time');
   assert.strictEqual(store.getPost(a).slot_at, now + 3600e3, 'retries never change the posting time');
   store.close();
 });
@@ -221,12 +221,12 @@ test('upload failures retry on their own timer (image kept); generation limits n
   await engine.handleError('gen', g, new RateLimitError('ChatGPT image/usage limit reached', 3600e3), null, quietLog);
   assert.strictEqual(store.getPost(g).status, 'scheduled');
   assert.ok(engine.providerPausedUntil() > Date.now(), 'image generation pauses for the limit');
-  assert.strictEqual(store.nextToUpload(Date.now() + 61000, { onlyDue: false }).id, id, 'uploads continue during the image limit');
+  assert.strictEqual(store.nextToUpload(Date.now() + 61000, { maxSlot: Date.now() + 10 * 86400e3 }).id, id, 'uploads continue during the image limit');
 
   const r = store.createPost(dayKey(), Date.now() + 9000e3);
   store.updatePost(r, { status: 'generating', gen_attempts: 1 });
-  await engine.handleError('gen', r, new UiError('ChatGPT refused to create the image: policy'), null, quietLog);
-  assert.strictEqual(store.getPost(r).status, 'failed', 'a refused prompt is a genuine permanent error');
+  await engine.handleError('gen', r, new UiError('ChatGPT did not create an image after 6 tries (I can not create that)'), null, quietLog);
+  assert.strictEqual(store.getPost(r).status, 'scheduled', 'no image yet: generation keeps retrying (with a new concept)');
   store.close();
 });
 
@@ -327,3 +327,82 @@ test('sound: Urdu motivational lines - only Urdu-search results, spoken sounds p
   assert.strictEqual(ranked[0].query, 'urdu motivation', 'remembers the search that found it');
   assert.ok(URDU_SOUND_QUERIES.length >= 8);
 });
+
+test('switches: Generate and Auto upload work independently; both off pauses everything', async () => {
+  const store = new Store(tmpDb());
+  store.addPrompt('p');
+  store.setSetting('daily_quantity', '3');
+  const engine = new (require('../src/main/engine').Engine)({ store, chrome: { isConnected: () => true, closePage: async () => {}, connect: async () => {} }, dirs: {}, log: quietLog });
+  const calls = [];
+  engine.generateOne = async () => { calls.push('gen'); };
+  engine.uploadOne = async () => { calls.push('upload'); };
+  const now = Date.now();
+  store.createPost(dayKey(), now + 3600e3);
+  const ready = store.createPost(dayKey(), now - 60000);
+  store.updatePost(ready, { status: 'ready', caption: 'c', image_path: __filename });
+  store.setSetting('gen_enabled', '1'); store.setSetting('upload_enabled', '0');
+  await engine.runGenWorker(); await engine.runUploadWorker();
+  assert.deepStrictEqual(calls, ['gen'], 'Generate ON + Upload OFF: generate only');
+  calls.length = 0;
+  store.setSetting('gen_enabled', '0'); store.setSetting('upload_enabled', '1');
+  await engine.runGenWorker(); await engine.runUploadWorker();
+  assert.deepStrictEqual(calls, ['upload'], 'Generate OFF + Upload ON: upload existing posts only');
+  store.setSetting('upload_enabled', '0');
+  assert.strictEqual(engine.running, false, 'both OFF: paused');
+  await new Promise((r) => setTimeout(r, 700));
+  store.close();
+});
+
+test('TikTok limit: never more than 30 scheduled posts; generation continues past it', () => {
+  const store = new Store(tmpDb());
+  const now = Date.now();
+  for (let i = 0; i < 30; i++) {
+    const id = store.createPost(dayKey(), now + (i + 1) * 3600e3);
+    store.updatePost(id, { status: 'tiktok_scheduled', published_at: now + (i + 1) * 3600e3, caption_key: `k${i}` });
+  }
+  assert.strictEqual(store.countFutureTikTokScheduled(now), 30);
+  const engine = makeEngine(store);
+  store.setSetting('scheduling_mode', 'tiktok');
+  store.setSetting('upload_enabled', '1');
+  const r = store.createPost(dayKey(), now + 2 * 3600e3);
+  store.updatePost(r, { status: 'ready', caption: 'c', image_path: __filename });
+  let picked = 'none';
+  engine.runWorker = async (key, pick) => { picked = pick(); };
+  engine.runUploadWorker();
+  assert.strictEqual(picked, null, 'no upload while 30 posts are scheduled');
+  assert.ok(/30\/30/.test(engine.workers.upload.text));
+  store.close();
+});
+
+test('continuous generation plans the next day when every planned post has its image', () => {
+  const store = new Store(tmpDb());
+  store.setSetting('daily_quantity', '4');
+  const engine = makeEngine(store);
+  const today = dayKey();
+  const first = store.createPost(today, Date.now() + 3600e3);
+  store.updatePost(first, { status: 'ready', caption: 'c', image_path: __filename });
+  assert.ok(engine.planNextDay());
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+  assert.strictEqual(store.postsForDay(dayKey(tomorrow)).length, 4, 'next day planned with the daily quantity');
+  assert.ok(engine.planNextDay());
+  assert.ok(store.lastPlannedDay() > dayKey(tomorrow), 'keeps extending the queue');
+  store.close();
+});
+
+test('export: every generated post is saved with its image, caption, hashtags and posting date', () => {
+  const store = new Store(tmpDb());
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'export-'));
+  const engine = new (require('../src/main/engine').Engine)({ store, chrome: { isConnected: () => false }, dirs: { export: dir }, log: quietLog });
+  const img = path.join(dir, 'src.png');
+  fs.writeFileSync(img, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]));
+  const id = store.createPost(dayKey(), Date.now() + 3600e3);
+  store.updatePost(id, { status: 'ready', title: 'T', caption: 'Hello', hashtags: JSON.stringify(['#a', '#b']), image_path: img, image_hash: 'h' });
+  engine.exportPost(id);
+  const files = fs.readdirSync(dir).filter((x) => x.includes(`post-${id}`));
+  assert.ok(files.some((x) => x.endsWith('.png')) && files.some((x) => x.endsWith('.json')) && files.some((x) => x.endsWith('.txt')));
+  const data = JSON.parse(fs.readFileSync(path.join(dir, files.find((x) => x.endsWith('.json'))), 'utf8'));
+  assert.deepStrictEqual([data.caption, data.hashtags.join(' ')], ['Hello', '#a #b']);
+  assert.ok(data.postingDate);
+  store.close();
+});
+

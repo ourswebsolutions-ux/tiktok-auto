@@ -10,7 +10,7 @@
 //   regenerate: "Redo" button on the answer
 
 const { NeedsHumanError, RateLimitError, UiError, sleep, waitUntil, visible, safeClick, gotoSafe, detectChallenge } = require('./util');
-const { generatePostWith, imageSize } = require('./chatgpt');
+const { generatePostWith, imageSize, FORCE_IMAGE_MESSAGE } = require('./chatgpt');
 
 const GEMINI_URL = 'https://gemini.google.com/app';
 const COMPOSER = 'rich-textarea .ql-editor[contenteditable="true"], div[contenteditable="true"][aria-label*="prompt" i]';
@@ -114,7 +114,7 @@ async function ask(page, text, { timeout = 600000, expectImage = false, imageRea
     before.count = -1;
     await sleep(3000);
   } else {
-    await typeIntoComposer(page, text === null ? 'Please regenerate the image now, following my instructions above exactly.' : text);
+    await typeIntoComposer(page, text === null ? FORCE_IMAGE_MESSAGE : text);
     const send = page.locator(SEND).filter({ visible: true }).first();
     if (await visible(send)) await safeClick(page, send, 'the Gemini send button', dismissOverlays);
     else await page.keyboard.press('Enter');

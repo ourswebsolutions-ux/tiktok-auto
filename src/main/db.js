@@ -201,12 +201,28 @@ class Store {
     ).get(now));
   }
 
-  // Upload worker: next post with a ready image. TikTok-based: any (scheduled ahead on TikTok); software-based: only
-  // when its posting time has come. A post waiting for its retry time never blocks the others.
-  nextToUpload(now, { onlyDue }) {
+  // Upload worker: next post with a ready image whose posting time is <= maxSlot (software-based: now; TikTok-based:
+  // inside TikTok's scheduling window). A post waiting for its retry time never blocks the others.
+  nextToUpload(now, { maxSlot }) {
     return plain(this.db.prepare(
-      `SELECT * FROM posts WHERE status = 'ready' AND next_try_at <= ? ${onlyDue ? `AND ${SLOT} <= ?` : ''} ORDER BY ${SLOT} ASC LIMIT 1`,
-    ).get(...(onlyDue ? [now, now] : [now])));
+      `SELECT * FROM posts WHERE status = 'ready' AND next_try_at <= ? AND ${SLOT} <= ? ORDER BY ${SLOT} ASC LIMIT 1`,
+    ).get(now, maxSlot));
+  }
+
+  // Posts currently waiting on TikTok's scheduler (counts toward TikTok's limit of scheduled posts).
+  countFutureTikTokScheduled(now) {
+    return Number(this.db.prepare('SELECT COUNT(*) AS c FROM posts WHERE status IN (\'tiktok_scheduled\', \'posting\') AND published_at > ?').get(now).c);
+  }
+
+  // Every post that has a generated image (waiting, being uploaded, scheduled or published).
+  countImagesGenerated() {
+    return Number(this.db.prepare('SELECT COUNT(*) AS c FROM posts WHERE image_hash IS NOT NULL AND status NOT IN (\'cancelled\')').get().c);
+  }
+
+  // Last day that has planned posts (continuous generation adds the day after it).
+  lastPlannedDay() {
+    const row = this.db.prepare('SELECT MAX(day) AS d FROM posts WHERE status NOT IN (\'missed\', \'cancelled\')').get();
+    return row && row.d ? row.d : null;
   }
 
   // Posts scheduled on TikTok whose time has passed are published by TikTok.

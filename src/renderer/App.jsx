@@ -31,10 +31,22 @@ function statusLine(state) {
   if (s.phase === 'connecting') return { tone: 'busy', title: 'Connecting', text: s.step || 'Connecting to your Chrome...' };
   if (s.phase === 'stopping') return { tone: 'busy', title: 'Stopping', text: 'Finishing the current step...' };
   if (state.running) {
+    const sw = state.switches || {};
+    const what = sw.generate && sw.upload ? 'Generating and uploading' : sw.generate ? 'Generating and saving images only (upload is off)' : 'Uploading already generated posts only (generation is off)';
     const mode = state.schedulingMode === 'tiktok' ? 'TikTok-Based scheduling' : 'Software-Based scheduling';
-    return { tone: 'ok', title: 'Running', text: s.nextPostAt ? `${mode} · next post ${fmtTime(s.nextPostAt)}` : mode };
+    return { tone: 'ok', title: 'Running', text: `${what} · ${mode}` };
   }
-  return { tone: 'off', title: 'Stopped', text: 'Press Start to generate and post automatically' };
+  return { tone: 'off', title: 'Paused', text: 'Both switches are off - turn on Generate images and/or Auto upload to TikTok' };
+}
+
+// Large on/off switch used for the two automation switches.
+function Switch({ label, on, onChange }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} className={`switch ${on ? 'on' : ''}`} onClick={() => onChange(!on)}>
+      <span className="track"><span className="knob" /></span>
+      <span className="switch-label">{label}<small>{on ? 'ON' : 'OFF'}</small></span>
+    </button>
+  );
 }
 
 const WORKER_STATE = {
@@ -48,7 +60,7 @@ const WORKER_STATE = {
 // One live status card per worker (image generation / TikTok upload). A progress bar only appears when the website
 // itself reports a percentage.
 function WorkerCard({ icon, title, worker, running, footer }) {
-  const [label, tone] = running ? (WORKER_STATE[worker.state] || ['Idle', 'ok']) : ['Stopped', 'off'];
+  const [label, tone] = running ? (WORKER_STATE[worker.state] || ['Idle', 'ok']) : ['Off', 'off'];
   const pct = (worker.text || '').match(/(\d{1,3})%/);
   return (
     <div className={`worker ${running ? tone : 'off'}`}>
@@ -58,7 +70,7 @@ function WorkerCard({ icon, title, worker, running, footer }) {
         <span className={`pill ${running ? tone : 'off'}`}>{label}</span>
       </div>
       <p className="worker-text">
-        {running ? (worker.text || (worker.state === 'idle' ? 'Nothing to do right now' : '...')) : 'Starts with the automation'}
+        {running ? (worker.text || (worker.state === 'idle' ? 'Nothing to do right now' : '...')) : 'Switched off'}
         {worker.postId ? <span className="muted"> · post #{worker.postId}</span> : null}
       </p>
       {running && pct && <div className="bar"><span style={{ width: `${Math.min(100, Number(pct[1]))}%` }} /></div>}
@@ -145,11 +157,12 @@ export default function App() {
     setQty(String(r.value));
   };
 
-  const start = async () => {
+  // The two independent switches (both off = automation paused).
+  const toggle = async (which, on) => {
     await saveQty(qty);
     setNotice(null);
-    const r = await api.start();
-    if (!r.ok) setNotice({ tone: 'warn', title: r.message, text: r.instructions });
+    const r = which === 'generate' ? await api.setGenerate(on) : await api.setUpload(on);
+    if (r && !r.ok && r.message) setNotice({ tone: 'warn', title: r.message, text: r.instructions });
     refresh();
   };
 
@@ -174,6 +187,9 @@ export default function App() {
   };
 
   const q = state.queue || { waitingForImage: 0, generating: 0, ready: 0, uploading: 0 };
+  const sw = state.switches || { generate: false, upload: false };
+  const ov = state.overview || { imagesGenerated: 0, pendingUpload: 0, scheduledOnTikTok: 0, published: 0, publishedToday: 0, limit: 30 };
+  const limitFull = ov.scheduledOnTikTok >= ov.limit;
   const aiName = state.aiProvider === 'gemini' ? 'Gemini' : 'ChatGPT';
 
   return (
@@ -216,10 +232,9 @@ export default function App() {
             </div>
           </div>
           <div className="hero-actions">
+            <Switch label="Generate images" on={sw.generate} onChange={(v) => toggle('generate', v)} />
+            <Switch label="Auto upload to TikTok" on={sw.upload} onChange={(v) => toggle('upload', v)} />
             <button className="btn ghost" disabled={checking} onClick={check}>{checking ? 'Checking...' : 'Check Chrome'}</button>
-            {state.running
-              ? <button className="btn stop big" onClick={() => api.stop().then(refresh)}>■ Stop</button>
-              : <button className="btn primary big" onClick={start} disabled={!state.prompts.length}>▶ Start Automation</button>}
           </div>
         </div>
         <div className="workers">
@@ -227,25 +242,29 @@ export default function App() {
             icon="🖼"
             title={`Image generation · ${aiName}`}
             worker={state.workers ? state.workers.gen : {}}
-            running={state.running}
+            running={sw.generate}
             footer={`${q.waitingForImage} waiting for an image · ${q.generating} generating`}
           />
           <WorkerCard
             icon="⬆"
             title="TikTok upload"
             worker={state.workers ? state.workers.upload : {}}
-            running={state.running}
+            running={sw.upload}
             footer={`${q.ready} image(s) ready · ${q.uploading} uploading`}
           />
         </div>
       </section>
 
       <section className="stats">
-        <div className="card stat"><span className="num">{state.stats.totalPublished}</span><span className="lbl">Total published</span></div>
-        <div className="card stat"><span className="num">{state.stats.todayPublished}</span><span className="lbl">Published today</span></div>
-        <div className="card stat"><span className="num">{state.stats.tiktokScheduled}</span><span className="lbl">Scheduled on TikTok</span></div>
-        <div className="card stat"><span className="num">{q.ready}</span><span className="lbl">Images ready</span></div>
-        <div className="card stat"><span className="num">{state.stats.pending}</span><span className="lbl">Pending</span></div>
+        <div className="card stat"><span className="num">{ov.imagesGenerated}</span><span className="lbl">Images generated</span></div>
+        <div className="card stat"><span className="num">{ov.pendingUpload}</span><span className="lbl">Posts pending upload</span></div>
+        <div className="card stat"><span className="num">{ov.scheduledOnTikTok}</span><span className="lbl">Posts scheduled on TikTok</span></div>
+        <div className="card stat"><span className="num">{ov.published}</span><span className="lbl">Posts published{ov.publishedToday ? ` · ${ov.publishedToday} today` : ''}</span></div>
+        <div className={`card stat ${limitFull ? 'limit-full' : ''}`}>
+          <span className="num">{ov.scheduledOnTikTok}/{ov.limit}</span>
+          <span className="lbl">{limitFull ? 'Upload limit reached - waits for free slots' : `Upload limit · ${ov.limit - ov.scheduledOnTikTok} slots free`}</span>
+          <div className="bar"><span style={{ width: `${Math.min(100, (ov.scheduledOnTikTok / ov.limit) * 100)}%` }} /></div>
+        </div>
       </section>
 
       <section className="card settings">
@@ -281,6 +300,10 @@ export default function App() {
             <button type="button" role="radio" aria-checked={state.schedulingMode !== 'tiktok'} className={state.schedulingMode !== 'tiktok' ? 'on' : ''} onClick={() => api.setSchedulingMode('software').then(refresh)}>Software-Based</button>
             <button type="button" role="radio" aria-checked={state.schedulingMode === 'tiktok'} className={state.schedulingMode === 'tiktok' ? 'on' : ''} onClick={() => api.setSchedulingMode('tiktok').then(refresh)}>TikTok-Based</button>
           </div>
+        </div>
+        <div className="setting">
+          <label>Export folder</label>
+          <button className="btn small" onClick={() => api.openExport()} title={state.exportDir || ''}>Open export folder</button>
         </div>
         <p className="hint">
           {state.schedulingMode === 'tiktok'
