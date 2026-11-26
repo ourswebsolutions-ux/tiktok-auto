@@ -90,7 +90,7 @@ test('store: duplicate caption cannot be posted twice; stats; recovery-friendly'
   store.close();
 });
 
-test('engine init: interrupted publishing is verified, never re-posted; old slots marked missed', () => {
+test('engine init: interrupted publishing is uploaded again; interrupted generation resumes; old empty slots missed', () => {
   const { Engine } = require('../src/main/engine');
   const store = new Store(tmpDb());
   const yesterday = dayKey(new Date(Date.now() - 86400e3));
@@ -104,7 +104,8 @@ test('engine init: interrupted publishing is verified, never re-posted; old slot
   engine.init();
   assert.strictEqual(store.getPost(old).status, 'missed');
   assert.strictEqual(store.getPost(gen).status, 'scheduled');
-  assert.strictEqual(store.getPost(posting).status, 'unverified');
+  assert.strictEqual(store.getPost(posting).status, 'scheduled');
+  assert.ok(store.getPost(posting).error.includes('uploading again'), 'no confirmation round, straight back into the upload queue');
   store.close();
 });
 

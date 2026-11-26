@@ -213,11 +213,10 @@ class Store {
     ).get(excludeId || 0, after));
   }
 
-  // Posts scheduled on TikTok whose time has passed and whose live check is due.
-  dueTikTokLiveCheck(now, delayMs) {
-    return plain(this.db.prepare(
-      'SELECT * FROM posts WHERE status = \'tiktok_scheduled\' AND published_at + ? <= ? AND scheduled_at <= ? ORDER BY published_at ASC LIMIT 1',
-    ).get(delayMs, now, now));
+  // Posts scheduled on TikTok whose time has passed are published by TikTok.
+  promoteDueTikTokScheduled(now) {
+    return this.db.prepare('UPDATE posts SET status = \'published\', updated_at = ? WHERE status = \'tiktok_scheduled\' AND published_at <= ?')
+      .run(now, now).changes;
   }
 
   // Older posts that ended as "could not confirm" but still have their content: candidates for reuse.

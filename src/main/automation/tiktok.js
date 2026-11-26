@@ -11,7 +11,6 @@
 const { NeedsHumanError, UiError, sleep, normalize, waitUntil, visible, detectChallenge, wordSet, safeClick } = require('./util');
 
 const UPLOAD_URL = 'https://www.tiktok.com/tiktokstudio/upload?from=webapp';
-const CONTENT_URL = 'https://www.tiktok.com/tiktokstudio/content';
 const MIN_SOUND_USES = 10000; // a sound must be visibly used in at least this many videos to count as popular
 const SITE = 'TikTok';
 
@@ -432,23 +431,6 @@ async function clickPostAndConfirm(page, shouldAbort, buttonName = 'Post') {
   return res;
 }
 
-// Looks for the post (by title/description) at the top of TikTok Studio's Posts list.
-async function findInPostsList(page, { title, caption }) {
-  await page.goto(CONTENT_URL, { waitUntil: 'commit', timeout: 90000 });
-  assertNotLoginPage(page);
-  const keys = [title, caption].map((s) => normalize(s).slice(0, 45)).filter((s) => s.length >= 12);
-  try {
-    await waitUntil(page, async () => {
-      const text = normalize((await page.evaluate(() => (document.querySelector('main') || document.body).innerText).catch(() => '')).slice(0, 6000));
-      return keys.some((k) => text.includes(k));
-    }, { timeout: 75000, interval: 2500, label: 'post in TikTok Posts list', site: SITE });
-    return true;
-  } catch (e) {
-    if (e instanceof NeedsHumanError) throw e;
-    return false;
-  }
-}
-
 /**
  * Full publish flow for one photo post.
  * hooks.beforePost() is called right before clicking Post (used to persist the "posting" state).
@@ -501,19 +483,17 @@ async function publishPhotoPost(page, post, { log, shouldAbort, recentSounds, be
   await beforePost(sound);
   onProgress(scheduleAt ? 'Scheduling on TikTok' : 'Publishing');
   const res = await clickPostAndConfirm(page, shouldAbort, scheduleAt ? 'Schedule' : 'Post');
-  if (!res.ok && !res.timeout) return { published: false, failedAfterClick: true, message: `TikTok reported: ${res.message}`, sound };
-
-  onProgress('Confirming publication on TikTok');
-  let listed = false;
-  for (let i = 0; i < 3 && !listed; i++) {
-    // eslint-disable-next-line no-await-in-loop
-    listed = await findInPostsList(page, { title: post.title, caption: post.caption });
-    // eslint-disable-next-line no-await-in-loop
-    if (!listed) await sleep(20000);
-  }
+  // TikTok's own response right after the click is the confirmation (success message / switch to the Posts page).
+  // No Posts-list search: scheduled posts are not listed there before their time anyway.
   const when = scheduledFor ? ` (scheduled on TikTok for ${scheduledFor})` : '';
-  if (listed) return { published: true, signal: `${res.signal || 'posted'}; found in TikTok Posts list${when}`, sound, scheduledFor };
-  return { published: false, unverified: true, tiktokConfirmed: !!res.ok, message: res.ok ? `TikTok showed "${res.signal}" but the post is not in the Posts list yet${when}` : `No confirmation from TikTok after clicking ${scheduleAt ? 'Schedule' : 'Post'}`, sound, scheduledFor };
+  if (res.ok) return { published: true, signal: `${res.signal || 'confirmed by TikTok'}${when}`, sound, scheduledFor };
+  return {
+    published: false,
+    failedAfterClick: true,
+    message: res.timeout ? `No confirmation from TikTok after clicking ${scheduleAt ? 'Schedule' : 'Post'}` : `TikTok reported: ${res.message}`,
+    sound,
+    scheduledFor,
+  };
 }
 
-module.exports = { checkTikTok, publishPhotoPost, findInPostsList, rankSounds, collectMusic, tiktokScheduleTime, tzOffsetMinutes, wallClock, MIN_SOUND_USES };
+module.exports = { checkTikTok, publishPhotoPost, rankSounds, collectMusic, tiktokScheduleTime, tzOffsetMinutes, wallClock, MIN_SOUND_USES };

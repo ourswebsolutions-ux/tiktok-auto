@@ -10,7 +10,7 @@ everyday Chrome** (your existing logins):
 3. opens **TikTok Studio** and uploads the image as a photo post,
 4. picks a **relevant, popular sound** (see below) and attaches it,
 5. enters title, caption and hashtags, switches on TikTok's *AI-generated content* label and verifies everything,
-6. clicks **Post** and only counts the post as published once it appears in your TikTok Studio *Posts* list.
+6. clicks **Post** (or **Schedule**) and only counts the post as done when TikTok confirms it right after the click.
 
 No API keys, no paid integrations, no passwords stored.
 
@@ -104,11 +104,11 @@ posting times are the same in both modes, and automation runs continuously until
 Each post is tracked step by step (image + caption → upload → scheduled/published → live). After an error or a
 restart the app continues from the last completed step; a generated image is never generated again or left behind.
 
-- Not confirmed by TikTok after 2 short checks (3 minutes apart): the same post is uploaded again – scheduled for its
-  original time if that is still ahead, otherwise published immediately. No long "Confirming" loops.
-- TikTok-Based mode: if TikTok confirms the scheduling, the post is "Scheduled on TikTok" and is checked again after
-  its time; if it is not live an hour later it is uploaded again. Uploads are strictly one at a time – the next post
-  waits until the current one is scheduled on TikTok.
+- TikTok's own response right after clicking Post/Schedule is the confirmation – there are no extra confirmation
+  checks. If TikTok does not confirm, the same post is uploaded again right away – scheduled for its original time if
+  that is still ahead, otherwise published immediately.
+- TikTok-Based mode: a confirmed post shows as "Scheduled on TikTok" and counts as published once its time has passed.
+  Uploads are strictly one at a time – the next post waits until the current one is scheduled on TikTok.
 - Upload/scheduling failures are retried (1, 2, 5, 10, 15, 15 … minutes) until the post is on TikTok. Only a genuine
   permanent error stops a post (the AI refuses the prompt). Posts of a past day that already have their image are
   published today instead of being dropped.
@@ -132,8 +132,8 @@ can be attached, the post goes out without an added sound – never a random one
 ## Safety and reliability
 
 - Every step is checked before the next; on any unexpected page nothing is published (logged with a screenshot).
-- A post is marked *Publishing* right before clicking Post. After a crash, restart or error from that point on, the app
-  first checks your TikTok Posts list and never re-posts blindly. Captions are unique in the database.
+- A post is marked *Publishing* right before clicking Post. If a crash, restart or error interrupts it from that point
+  on, the post is uploaded again. Captions are unique in the database.
 - Ideas, captions, image concepts, hashtag sets, images and sounds are compared with earlier posts to avoid repeats.
 - **CAPTCHAs, logins and security checks are never bypassed:** the app pauses, brings the tab to the front and notifies
   you. After a CAPTCHA disappears it continues automatically; after logging in press **Resume**.
